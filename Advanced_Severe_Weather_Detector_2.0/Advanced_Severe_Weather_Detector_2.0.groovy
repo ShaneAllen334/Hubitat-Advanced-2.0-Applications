@@ -78,6 +78,59 @@ def renderTableHTML() {
     return tableHTML
 }
 
+def renderAccuracyTableHTML() {
+    def hist = state.predictionAccuracyHistory ?: []
+    def tableHTML = """
+    <h4 style="margin:0 0 10px 0; border-bottom:1px solid #ccc; padding-bottom:5px; color:#333; margin-top:20px;">ML Prediction Accuracy & Adjustments</h4>
+    """
+    if (hist.size() == 0) {
+        return tableHTML + "<div style='padding:10px; background:#f9f9f9; border:1px solid #ddd; font-size: 13px;'>Tracking active. Waiting for prediction validations, misses, or false alarms to log adjustments.</div>"
+    }
+
+    tableHTML += """
+    <div style="max-height: 250px; overflow-y: auto; border: 1px solid #eee; margin-bottom: 20px;">
+        <table class="dash-table" style="margin-top:0;">
+            <thead style="position: sticky; top: 0; box-shadow: 0 1px 2px rgba(0,0,0,0.1);">
+                <tr>
+                    <th>Time</th>
+                    <th>Hazard</th>
+                    <th>Outcome</th>
+                    <th>Weight Change</th>
+                    <th>New Multiplier</th>
+                </tr>
+            </thead>
+            <tbody>
+    """
+
+    hist.each { entry ->
+        def timeStr = new Date(entry.time as Long).format("MM/dd HH:mm", location.timeZone)
+        def color = "black"
+        if (entry.event == "False Alarm") color = "orange"
+        if (entry.event == "Missed Event") color = "red"
+        if (entry.event == "Validated") color = "green"
+
+        def weightStr = (entry.weightChange as Float) > 0 ? "+${String.format('%.2f', entry.weightChange)}" : String.format('%.2f', entry.weightChange)
+
+        tableHTML += """
+                <tr>
+                    <td style="color: #555;">${timeStr}</td>
+                    <td>${entry.category}</td>
+                    <td style="font-weight: bold; color: ${color};">${entry.event}</td>
+                    <td style="font-weight: bold;">${weightStr}</td>
+                    <td>x${String.format('%.2f', entry.newMultiplier)}</td>
+                </tr>
+        """
+    }
+
+    tableHTML += """
+            </tbody>
+        </table>
+    </div>
+    """
+    return tableHTML
+}
+
+
 String getHumanReadableStatus() {
     def isStale = state.isStale ?: false
     if (isStale) return "<span style='color:red; font-size:14px;'><b>🚨 CRITICAL: SENSORS OFFLINE. Prediction Engine Halted. 🚨</b></span>"
@@ -94,8 +147,8 @@ String getHumanReadableStatus() {
     if (tsState == "WATCH") return "<span style='color:orange;'><b>⛈️ SEVERE THUNDERSTORM WATCH.</b></span> Elevated probability of convection."
     if (floodState == "WARNING") return "<span style='color:red;'><b>🌊 FLASH FLOOD WARNING ACTIVE.</b></span> Critical rain rates on saturated ground."
     if (floodState == "WATCH") return "<span style='color:orange;'><b>🌊 FLASH FLOOD WATCH.</b></span> Elevated probability of flooding."
-    if (heatState == "WARNING") return "<span style='color:red;'><b>🔥 SEVERE HEAT WARNING ACTIVE.</b></span> Dangerous apparent temperatures detected."
-    if (heatState == "WATCH") return "<span style='color:orange;'><b>🔥 HEAT ADVISORY WATCH.</b></span> Elevated temperature and humidity levels."
+    if (heatState == "WARNING") return "<span style='color:red;'><b>🔥 SEVERE HEAT WARNING ACTIVE.</b></span> Dangerous WBGT heat stress levels detected."
+    if (heatState == "WATCH") return "<span style='color:orange;'><b>🔥 HEAT ADVISORY WATCH.</b></span> Elevated WBGT heat stress levels detected."
     
     return "<span style='color:green;'><b>Tracking Stable Conditions.</b></span> The environment is currently clear."
 }
@@ -152,6 +205,8 @@ def mainPage() {
                 def ah = state.currentAH ?: 0.0
                 def dp = state.currentDewPoint ?: 0.0
                 def wb = state.currentWetBulb ?: 0.0
+                def wbgt = state.currentWBGT ?: t
+                
                 def dpSpread = state.dewPointSpread ?: 0.0
                 def pTrend = state.pressureTrendStr ?: "Stable"
                 def tTrend = state.tempTrendStr ?: "Stable"
@@ -181,7 +236,8 @@ def mainPage() {
                 def lightStr = "None Recent"
                 if (sensorLightning && strikes > 0) {
                     def vecColor = lightVector.contains("Approaching") ? "red" : (lightVector.contains("Departing") ? "green" : "orange")
-                    lightStr = "${strikes} strikes (3hr) | Closest: ${recentLightDistStr} ${distUnit} | <span style='color:${vecColor}; font-weight:bold;'>${lightVector}</span>"
+                    def ljStr = state.lightningJumpDetected ? "<span style='color:red; font-weight:bold;'>[⚡ JUMP DETECTED]</span> " : ""
+                    lightStr = "${ljStr}${strikes} strikes (3hr) | Closest: ${recentLightDistStr} ${distUnit} | <span style='color:${vecColor}; font-weight:bold;'>${lightVector}</span>"
                 }
                 
                 def wetCountRaw = [sensorLeak, sensorLeak2, sensorLeak3].count { it?.currentValue("water") == "wet" }
@@ -232,6 +288,7 @@ def mainPage() {
                         <tr><td class="dash-hl">Lightning Vectoring</td><td colspan="2" class="dash-val">${lightStr}</td></tr>
 
                         <tr><td colspan="3" class="dash-subhead">Thermodynamic & Kinetic Calculations</td></tr>
+                        <tr><td class="dash-hl">Wet-Bulb Globe Temp (WBGT)</td><td colspan="2" class="dash-val"><b>${String.format('%.1f', wbgt)}°</b> <span style="font-size:11px; color:gray;">(Military/OSHA Thermal Standard)</span></td></tr>
                         <tr><td class="dash-hl">Dew Point Spread</td><td><b>${String.format('%.1f', dpSpread)}°</b></td><td>Convergence: ${sTrend}</td></tr>
                         <tr><td class="dash-hl">Absolute Humidity</td><td><b>${String.format('%.2f', ah)} g/m³</b></td><td>Advection Trend: ${ahTrend}</td></tr>
                         <tr><td class="dash-hl">Atmospheric Gravity Waves</td><td colspan="2" class="dash-val">${gravWave}</td></tr>
@@ -270,6 +327,7 @@ def mainPage() {
                 def dispMode = settings.historyDisplayMode ?: "Data Table"
                 if (dispMode == "Data Table") {
                     visualWidgets += renderTableHTML()
+                    visualWidgets += renderAccuracyTableHTML()
                 }
                 paragraph visualWidgets
                 
@@ -454,6 +512,7 @@ def updated() { logInfo("Updated"); unsubscribe(); unschedule(); initialize() }
 def initialize() {
     if (!state.actionHistory) state.actionHistory = []
     if (!state.alertCauseHistory) state.alertCauseHistory = []
+    if (!state.predictionAccuracyHistory) state.predictionAccuracyHistory = []
     
     if (!state.tornadoState) state.tornadoState = "Clear"
     if (!state.tstormState) state.tstormState = "Clear"
@@ -482,6 +541,9 @@ def initialize() {
     
     if (!state.ts_ml_mult) state.ts_ml_mult = 1.0
     if (!state.flood_ml_mult) state.flood_ml_mult = 1.0
+    
+    if (state.tsMissLogged == null) state.tsMissLogged = false
+    if (state.floodMissLogged == null) state.floodMissLogged = false
     
     state.evalPending = false
     state.lastEvalTime = 0
@@ -548,30 +610,50 @@ def getFloat(device, attrs, fallbackStr = null) {
     return fallbackStr
 }
 
-def tuneSevereML(category, falseAlarm) {
+def tuneSevereML(category, eventType) {
     if (settings.enableMLTuning == false) return
     
+    def change = 0.0
+    def currentMult = 1.0
+
     if (category == "Thunderstorm") {
-        if (falseAlarm) {
+        if (eventType == "False Alarm") {
+            change = -0.05
             state.ts_ml_mult -= 0.05
             if (state.ts_ml_mult < 0.60) state.ts_ml_mult = 0.60
-            logAction("🧠 ML Tuning: T-Storm False Alarm (Threat cleared without severe verification). Desensitizing multiplier to x${String.format('%.2f', state.ts_ml_mult)}")
-        } else {
+        } else if (eventType == "Validated" || eventType == "Missed Event") {
+            change = +0.05
             state.ts_ml_mult += 0.05
             if (state.ts_ml_mult > 1.20) state.ts_ml_mult = 1.20 
-            logAction("🧠 ML Tuning: T-Storm Validated. Increasing sensitivity multiplier to x${String.format('%.2f', state.ts_ml_mult)}")
         }
+        currentMult = state.ts_ml_mult
+        logAction("🧠 ML Tuning: T-Storm ${eventType}. Multiplier adjusted by ${change > 0 ? '+' : ''}${change} to x${String.format('%.2f', currentMult)}")
+        
     } else if (category == "Flood") {
-        if (falseAlarm) {
+        if (eventType == "False Alarm") {
+            change = -0.05
             state.flood_ml_mult -= 0.05
             if (state.flood_ml_mult < 0.60) state.flood_ml_mult = 0.60
-            logAction("🧠 ML Tuning: Flood False Alarm (Threat cleared without extreme rain rates). Desensitizing multiplier to x${String.format('%.2f', state.flood_ml_mult)}")
-        } else {
+        } else if (eventType == "Validated" || eventType == "Missed Event") {
+            change = +0.05
             state.flood_ml_mult += 0.05
             if (state.flood_ml_mult > 1.40) state.flood_ml_mult = 1.40
-            logAction("🧠 ML Tuning: Flood Validated. Increasing sensitivity multiplier to x${String.format('%.2f', state.flood_ml_mult)}")
         }
+        currentMult = state.flood_ml_mult
+        logAction("🧠 ML Tuning: Flood ${eventType}. Multiplier adjusted by ${change > 0 ? '+' : ''}${change} to x${String.format('%.2f', currentMult)}")
     }
+
+    def hist = state.predictionAccuracyHistory ?: []
+    hist.add(0, [
+        time: now(),
+        category: category,
+        event: eventType,
+        weightChange: change,
+        newMultiplier: currentMult
+    ])
+    
+    if (hist.size() > 50) hist = hist[0..49]
+    state.predictionAccuracyHistory = hist
 }
 
 void appButtonHandler(btn) {
@@ -623,6 +705,7 @@ void appButtonHandler(btn) {
         state.globalClearSince = now()
         state.allClearSent = true
         state.alertCauseHistory = []
+        state.predictionAccuracyHistory = []
         
         state.lastContactOpenTime = null
         state.lastHvacChangeTime = null
@@ -631,6 +714,8 @@ void appButtonHandler(btn) {
         state.flood_ml_mult = 1.0
         state.tsConfirmed = false
         state.floodConfirmed = false
+        state.tsMissLogged = false
+        state.floodMissLogged = false
         
         state.peakTorProb = 0
         state.peakTorTime = null
@@ -644,6 +729,7 @@ void appButtonHandler(btn) {
         state.lastNotificationTime = 0
         state.lastNotificationSeverity = 0
         state.hardwareAnomalyActive = false
+        state.lightningJumpDetected = false
         
         unschedule("evalWrapper")
         state.evalPending = false
@@ -786,6 +872,54 @@ def logAlertCause(type, probScore, reasons) {
 }
 
 // === METEOROLOGICAL MATHEMATICS ===
+
+def getStrikesInWindow(hist, startTime, endTime) {
+    def windowHist = hist.findAll { it.time >= startTime && it.time <= endTime }
+    if (windowHist.size() < 2) return 0
+    def strikes = 0
+    def lastVal = windowHist.first().value as Float
+    for (int i = 1; i < windowHist.size(); i++) {
+        def cVal = windowHist[i].value as Float
+        if (cVal >= lastVal) strikes += (cVal - lastVal)
+        else strikes += cVal 
+        lastVal = cVal
+    }
+    return strikes
+}
+
+def detectLightningJump() {
+    def hist = state.strikeCountHistory ?: []
+    if (hist.size() < 2) return false
+    def nowMs = now()
+    
+    def cutoff45 = nowMs - 2700000 // 45 mins
+    def recentHist = hist.findAll { it.time >= cutoff45 }
+    if (recentHist.size() < 2) return false
+    
+    def strikesLast5 = getStrikesInWindow(recentHist, nowMs - 300000, nowMs)
+    def strikesPast40 = getStrikesInWindow(recentHist, nowMs - 2700000, nowMs - 300000)
+    
+    def avgPast5MinRate = strikesPast40 / 8.0 // 40 mins = 8 x 5-min buckets
+    if (avgPast5MinRate < 2) avgPast5MinRate = 2 // Baseline floor
+    
+    // NWS-style conceptual threshold: > 2.5x historical average AND > 10 strikes in 5 mins
+    if (strikesLast5 >= (avgPast5MinRate * 2.5) && strikesLast5 > 10) {
+        return true
+    }
+    return false
+}
+
+def calculateWBGT(tF, rh, windMph, lux) {
+    def tC = isMetric() ? tF : (tF - 32.0) * (5.0 / 9.0)
+    def windMs = windMph * 0.44704
+    if (windMs < 0.1) windMs = 0.1
+    def solarW = lux / 126.7 // Convert Lux to approximate W/m^2
+    
+    // Validated empirical outdoor apparent temperature / WBGT model
+    def wbgtC = 0.735 * tC + 0.0374 * rh + 0.00292 * tC * rh + 0.0076 * solarW - 0.0572 * windMs
+    
+    return isMetric() ? wbgtC : (wbgtC * (9.0 / 5.0)) + 32.0
+}
 
 def calculateAbsoluteHumidity(tVal, rh) {
     def tC = isMetric() ? tVal : (tVal - 32.0) * (5.0 / 9.0)
@@ -938,10 +1072,23 @@ def getAngularDiff(angle1, angle2) {
 def evaluateWeather() {
     state.lastEvalTime = now()
     
-    def todayStr = new Date().format("yyyy-MM-dd", location.timeZone)
-    def currentHour = new Date().format("H", location.timeZone).toInteger()
-    def isMorningTransition = (currentHour >= 4 && currentHour < 10)
+    // --- NATIVE ASTRONOMICAL API CONTEXT ---
+    def isMorningTransition = false
+    try {
+        def sunInfo = getSunriseAndSunset()
+        if (sunInfo && sunInfo.sunrise) {
+            def srTime = sunInfo.sunrise.time
+            isMorningTransition = (now() >= srTime && now() <= (srTime + 14400000)) // Sunrise to +4 hours
+        } else {
+            def currentHour = new Date().format("H", location.timeZone).toInteger()
+            isMorningTransition = (currentHour >= 4 && currentHour < 10)
+        }
+    } catch (e) {
+        def currentHour = new Date().format("H", location.timeZone).toInteger()
+        isMorningTransition = (currentHour >= 4 && currentHour < 10)
+    }
 
+    def todayStr = new Date().format("yyyy-MM-dd", location.timeZone)
     if (!state.currentDateStr) state.currentDateStr = todayStr
     
     if (state.currentDateStr != todayStr) {
@@ -971,13 +1118,13 @@ def evaluateWeather() {
     def p = getFloat(sensorPress, ["pressure", "Baromrelin", "baromrelin", "Baromabsin", "baromabsin", "barometricPressure"], 0.0)
     p += (settings.pressOffset ?: 0.0)
 
-    if (settings.enableThermalSmoothing != false) {
-        def lastT = state.smoothedTemp != null ? state.smoothedTemp : t
+    if (settings.enableThermalSmoothing != false && state.smoothedTemp != null) {
+        def lastT = state.smoothedTemp
         if (t > lastT && (t - lastT) > 2.0 && state.tempHistory?.size() > 0) {
             t = lastT + ((t - lastT) * 0.3)
         }
-        state.smoothedTemp = t
     }
+    state.smoothedTemp = t
 
     def r = getFloat(sensorRain, ["rainRate", "hourlyrainin", "precipRate", "hourlyRain"], 0.0)
     def windVal = getFloat(sensorWind, ["windSpeed", "windspeedmph", "wind"], 0.0)
@@ -990,29 +1137,6 @@ def evaluateWeather() {
         if (rad != null) luxVal = rad * 126.7
     }
     if (luxVal == null) luxVal = 0.0
-    
-    if (r >= 0.5 && state.currentDayRain >= 0.02) state.floodConfirmed = true
-    if (recentStrikes > 0 || windVal > 30.0) state.tsConfirmed = true
-
-    def isMet = isMetric()
-    def th_pDropTornado  = isMet ? -1.35 : -0.04
-    def th_pAccelTVS     = isMet ? -2.71 : -0.08
-    def th_pRiseGust     = isMet ? 1.02 : 0.03
-    def th_pDropFlood    = isMet ? -1.02 : -0.03
-    def th_windTornado   = isMet ? 56.3 : 35.0
-    def th_windGust      = isMet ? 32.2 : 20.0
-    def th_windShift     = isMet ? 12.8 : 8.0
-    def th_windGustBase  = isMet ? 35.4 : 22.0
-    def th_tHigh         = isMet ? 29.4 : 85.0
-    def th_dpHigh        = isMet ? 21.1 : 70.0
-    def th_tDropGust     = isMet ? -1.1 : -2.0
-    def th_tDropMicro    = isMet ? -5.5 : -10.0
-    def th_dpSpreadMicro = isMet ? 13.8 : 25.0
-    def th_rainWeekSat   = isMet ? 50.8 : 2.0
-    def th_rainDaySat    = isMet ? 25.4 : 1.0
-    def th_rainDayFlood  = isMet ? 38.1 : 1.5
-    def rDiv             = isMet ? 50.8 : 2.0
-    def aDiv             = isMet ? 76.2 : 3.0
     
     def strikeCountRaw = getFloat(sensorLightning, ["lightningStrikeCount", "strikeCount", "strikes"], null)
     def recentStrikes = 0
@@ -1037,6 +1161,30 @@ def evaluateWeather() {
         recentStrikes = state.lightningHistory?.count { it.time >= cutoff3Hr } ?: 0
     }
     state.recentStrikes = Math.round(recentStrikes)
+    state.lightningJumpDetected = detectLightningJump()
+    
+    if (r >= 0.5 && state.currentDayRain >= 0.02) state.floodConfirmed = true
+    if (recentStrikes >= 3 || windVal > 30.0) state.tsConfirmed = true
+
+    def isMet = isMetric()
+    def th_pDropTornado  = isMet ? -1.35 : -0.04
+    def th_pAccelTVS     = isMet ? -2.71 : -0.08
+    def th_pRiseGust     = isMet ? 1.02 : 0.03
+    def th_pDropFlood    = isMet ? -1.02 : -0.03
+    def th_windTornado   = isMet ? 56.3 : 35.0
+    def th_windGust      = isMet ? 32.2 : 20.0
+    def th_windShift     = isMet ? 12.8 : 8.0
+    def th_windGustBase  = isMet ? 35.4 : 22.0
+    def th_tHigh         = isMet ? 29.4 : 85.0
+    def th_dpHigh        = isMet ? 21.1 : 70.0
+    def th_tDropGust     = isMet ? -1.1 : -2.0
+    def th_tDropMicro    = isMet ? -5.5 : -10.0
+    def th_dpSpreadMicro = isMet ? 13.8 : 25.0
+    def th_rainWeekSat   = isMet ? 50.8 : 2.0
+    def th_rainDaySat    = isMet ? 25.4 : 1.0
+    def th_rainDayFlood  = isMet ? 38.1 : 1.5
+    def rDiv             = isMet ? 50.8 : 2.0
+    def aDiv             = isMet ? 76.2 : 3.0
 
     def dp = calculateDewPoint(t, h)
     state.currentDewPoint = dp
@@ -1050,6 +1198,9 @@ def evaluateWeather() {
     def wb = calculateWetBulb(t, h)
     state.currentWetBulb = wb
 
+    def wbgt = calculateWBGT(t, h, windVal == "N/A" ? 0.0 : windVal, luxVal == "N/A" ? 0.0 : luxVal)
+    state.currentWBGT = wbgt
+
     def ah = calculateAbsoluteHumidity(t, h)
     state.currentAH = ah
     updateHistory("ahHistory", ah, 86400000)
@@ -1057,6 +1208,7 @@ def evaluateWeather() {
     state.ahTrendStr = ahTrendData.str
 
     def pTrendData = getTrendData(state.pressureHistory, 0.25, 1.0)
+    def pTrend15m = getTrendData(state.pressureHistory, 0.1, 0.25)
     def pAccel = getAccelerationData(state.pressureHistory)
     def tTrendData = getTrendData(state.tempHistory, 0.25, 1.0)
     def sTrendData = getTrendData(state.spreadHistory, 0.25, 1.0)
@@ -1108,6 +1260,17 @@ def evaluateWeather() {
         }
     } else {
         state.indoorAnomalyStr = "None"
+    }
+
+    // --- PTC (Pressure Tendency Characteristic) ---
+    def ptcActive = false
+    def ptcMsg = ""
+    def pFallReq15m = isMetric() ? -1.5 : -0.05
+    if (pTrendData.str != "Gathering Data" && pTrend15m.str != "Gathering Data") {
+        if (pTrendData.rate > -0.02 && pTrend15m.rate <= pFallReq15m) {
+            ptcActive = true
+            ptcMsg = "Severe Pre-Frontal Trough: Sudden pressure plunge after steady state."
+        }
     }
 
     def isGravityWave = false
@@ -1265,6 +1428,14 @@ def evaluateWeather() {
                     added += 50; msg = "Violent localized pressure plunge (TVS Signature)"; diagList << [name: "Tornado: Pressure Acceleration", status: "ACTIVE", effect: "+50%", desc: msg]; torFactors++ 
                 }
             }
+
+            if (ptcActive && !indoorAnomalyActive) {
+                added += 30; diagList << [name: "Tornado: PTC Plunge", status: "ACTIVE", effect: "+30%", desc: ptcMsg]; torFactors++
+            }
+            
+            if (state.lightningJumpDetected) {
+                added += 40; diagList << [name: "Tornado: Lightning Jump", status: "ACTIVE", effect: "+40%", desc: "Rapid Updraft Intensification (>2.5x historic avg)"]; torFactors++
+            }
             
             def kineticThresh = isMet ? 140.0 : 3.0
             if (windLoad >= kineticThresh || (sensorWind && windVal >= th_windTornado)) { added += 40; msg = "Destructive kinetic wind force"; diagList << [name: "Tornado: Kinetic Wind", status: "ACTIVE", effect: "+40%", desc: msg]; torFactors++ }
@@ -1307,6 +1478,14 @@ def evaluateWeather() {
             if (recentStrikes > 0) { 
                 def sScore = (recentStrikes / 10.0) * 40.0; if (sScore > 50) sScore = 50; 
                 added += sScore; msg = "${recentStrikes} strikes (3hr)"; diagList << [name: "T-Storm: Lightning", status: "ON", effect: "+${Math.round(sScore)}%", desc: msg]; tsFactors++ 
+            }
+
+            if (ptcActive && !indoorAnomalyActive) {
+                added += 30; diagList << [name: "T-Storm: PTC Plunge", status: "ACTIVE", effect: "+30%", desc: ptcMsg]; tsFactors++
+            }
+
+            if (state.lightningJumpDetected) {
+                added += 40; diagList << [name: "T-Storm: Lightning Jump", status: "ACTIVE", effect: "+40%", desc: "Rapid Updraft Intensification (>2.5x historic avg)"]; tsFactors++
             }
             
             if (windVal > th_windGust && pTrendData.rate >= th_pRiseGust && tTrendData.rate < th_tDropGust) { 
@@ -1400,37 +1579,34 @@ def evaluateWeather() {
             if (floodProb > 100) floodProb = 100
         }
 
-        // 4. SEVERE HEAT DNA
+        // 4. TRUE WBGT SEVERE HEAT DNA
         if (settings.enableHeat != false) {
             def added = 0
-            def msg = "Heat Levels Normal"
             
-            def heatBase = isMet ? 32.2 : 90.0
-            def heatSevere = isMet ? 37.8 : 100.0
-            def dpHigh = isMet ? 21.1 : 70.0
+            def wbgtBase = isMet ? 27.0 : 80.0
+            def wbgtHigh = isMet ? 31.1 : 88.0
+            def wbgtExtreme = isMet ? 32.2 : 90.0
+            def currentWBGT = state.currentWBGT ?: t
             
-            if (t > heatBase) {
-                added += 30
-                msg = "Elevated Temperature (${String.format('%.1f', t)}°)"
-                diagList << [name: "Heat: Base Temp", status: "ON", effect: "+30%", desc: msg]
-                heatFactors++
-            }
-            if (t > heatSevere) {
-                added += 30
-                msg = "Dangerous Heat Threshold (${String.format('%.1f', t)}°)"
-                diagList << [name: "Heat: Severe Temp", status: "ACTIVE", effect: "+30%", desc: msg]
-                heatFactors++
-            }
-            if (dp > dpHigh) {
+            if (currentWBGT > wbgtBase) {
                 added += 25
-                msg = "Oppressive Humidity (DP: ${String.format('%.1f', dp)}°)"
-                diagList << [name: "Heat: Moisture Load", status: "ACTIVE", effect: "+25%", desc: msg]
+                diagList << [name: "Heat: WBGT Base", status: "ON", effect: "+25%", desc: "Elevated Heat Stress (WBGT: ${String.format('%.1f', currentWBGT)}°)"]
                 heatFactors++
             }
-            if (sensorLux && luxVal > 75000) {
-                added += 15
-                msg = "Intense Solar Radiation"
-                diagList << [name: "Heat: Solar Index", status: "ON", effect: "+15%", desc: msg]
+            if (currentWBGT > wbgtHigh) {
+                added += 35
+                diagList << [name: "Heat: WBGT Severe", status: "ACTIVE", effect: "+35%", desc: "Dangerous Heat Stress (WBGT: ${String.format('%.1f', currentWBGT)}°)"]
+                heatFactors++
+            }
+            if (currentWBGT > wbgtExtreme) {
+                added += 40
+                diagList << [name: "Heat: WBGT Extreme", status: "ACTIVE", effect: "+40%", desc: "Extreme Danger / OSHA Black Flag (WBGT: ${String.format('%.1f', currentWBGT)}°)"]
+                heatFactors++
+            }
+            
+            if (t > (isMet ? 37.8 : 100.0)) {
+                added += 20
+                diagList << [name: "Heat: Air Temp Limit", status: "ACTIVE", effect: "+20%", desc: "Absolute Air Temp > 100°"]
                 heatFactors++
             }
             
@@ -1467,6 +1643,16 @@ def evaluateWeather() {
     
     def maxProb = Math.max(torProb, Math.max(tsProb, Math.max(floodProb, heatProb)))
     updateHistory("probHistory", maxProb, 86400000)
+    
+    // --- ML MISSED EVENT TRACKING (FALSE NEGATIVE DETECTOR) ---
+    if (state.tsConfirmed && !state.tsMissLogged && (state.peakTsProb ?: 0) < (settings.tstormWatchThresh ?: 60)) {
+        tuneSevereML("Thunderstorm", "Missed Event")
+        state.tsMissLogged = true
+    }
+    if (state.floodConfirmed && !state.floodMissLogged && (state.peakFloodProb ?: 0) < (settings.floodWatchThresh ?: 60)) {
+        tuneSevereML("Flood", "Missed Event")
+        state.floodMissLogged = true
+    }
 
     // ==========================================================
     // ADVANCED CONTINUOUS TIMERS & TRANSITIONS
@@ -1579,14 +1765,30 @@ def evaluateWeather() {
                     safeOff(settings["switch${haz}Warning"])
                     safeOff(settings["switch${haz}Watch"])
                     
-                    if (haz == "Thunderstorm" && state.peakTsProb >= 60) tuneSevereML("Thunderstorm", !state.tsConfirmed)
-                    else if (haz == "Flood" && state.peakFloodProb >= 60) tuneSevereML("Flood", !state.floodConfirmed)
+                    if (haz == "Thunderstorm") {
+                        if (state.peakTsProb >= 60) tuneSevereML("Thunderstorm", state.tsConfirmed ? "Validated" : "False Alarm")
+                        // Ensure confirmation tags are purged after weather clears
+                        state.tsConfirmed = false 
+                        state.tsMissLogged = false
+                    }
+                    else if (haz == "Flood") {
+                        if (state.peakFloodProb >= 60) tuneSevereML("Flood", state.floodConfirmed ? "Validated" : "False Alarm")
+                        // Ensure confirmation tags are purged after weather clears
+                        state.floodConfirmed = false
+                        state.floodMissLogged = false
+                    }
                     
                 } else if (target == "WARNING") {
                     safeOn(settings["switch${haz}Warning"])
                     safeOff(settings["switch${haz}Watch"])
                     if (state."${pfx}WarningArmed") {
-                        sendAlert("${hazEmoji} CRITICAL WARNING: ${haz} conditions actively detected!", settings."${pfx}WarningNotify", 3)
+                        def alertMsg = "${hazEmoji} CRITICAL WARNING: ${haz} conditions actively detected!"
+                        if (haz == "Tornado") alertMsg = "${hazEmoji} Emergency weather alert. A Tornado Warning is in effect. High atmospheric shear or sudden pressure plunges have been detected. Take shelter immediately in an interior room away from windows."
+                        else if (haz == "Thunderstorm") alertMsg = "${hazEmoji} Severe Thunderstorm Warning. A highly active storm with potential for severe weather is expected to impact the area shortly."
+                        else if (haz == "Flood") alertMsg = "${hazEmoji} Flash Flood Warning. Critical rain rates and heavy water accumulation detected on saturated ground. Watch for rapid surface runoff."
+                        else if (haz == "Heat") alertMsg = "${hazEmoji} Severe Heat Warning. Dangerous WBGT heat stress levels detected. Limit outdoor activity."
+                        
+                        sendAlert(alertMsg, settings."${pfx}WarningNotify", 3)
                         logAlertCause("${haz} WARNING", state."${pfx}Prob", state.logicReasoning)
                         state."${pfx}WarningArmed" = false 
                     } else {
@@ -1596,7 +1798,13 @@ def evaluateWeather() {
                     safeOn(settings["switch${haz}Watch"])
                     safeOff(settings["switch${haz}Warning"])
                     if (state."${pfx}WatchArmed") {
-                        sendAlert("${hazEmoji} WATCH: Elevated ${haz} probability detected.", settings."${pfx}WatchNotify", 2)
+                        def alertMsg = "${hazEmoji} WATCH: Elevated ${haz} probability detected."
+                        if (haz == "Tornado") alertMsg = "${hazEmoji} A Tornado Watch is now active. Atmospheric conditions are favorable for severe rotational wind shear. Stay aware of changing weather."
+                        else if (haz == "Thunderstorm") alertMsg = "${hazEmoji} A Severe Thunderstorm Watch is active. Atmospheric conditions are favorable for a storm to develop later today."
+                        else if (haz == "Flood") alertMsg = "${hazEmoji} A Flash Flood Watch is active. Recent rain has saturated the ground and additional incoming moisture creates a potential for flooding."
+                        else if (haz == "Heat") alertMsg = "${hazEmoji} A Heat Advisory Watch is active. Elevated heat stress levels detected."
+                        
+                        sendAlert(alertMsg, settings."${pfx}WatchNotify", 2)
                         logAlertCause("${haz} WATCH", state."${pfx}Prob", state.logicReasoning)
                         state."${pfx}WatchArmed" = false 
                     } else {
