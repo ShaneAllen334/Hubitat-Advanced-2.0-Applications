@@ -1,10 +1,10 @@
 /**
- * Advanced Overcast Detector 2.0
+ * Advanced Overcast Manager 2.0
  *
  * Author: ShaneAllen
  */
 definition(
-    name: "Advanced Overcast Detector 2.0",
+    name: "Advanced Overcast Manager 2.0",
     namespace: "ShaneAllen",
     author: "ShaneAllen",
     description: "None",
@@ -43,11 +43,12 @@ def mainPage() {
                         
             def currentLux = primaryLuxSensor ? "${getAggregateLux()} lx" : "-- lx"
             def oLimit = getSmartOvercastThreshold()
-            def oReason = useSmartThresholds ? "Smart Scaled" : "Static"
+            def oReason = useSmartThresholds ? "Astro-Scaled" : "Static"
             def cLimit = useDynamicClear ? getDynamicClearThreshold() : getSmartClearThreshold()
-            def cReason = useDynamicClear ? "Auto-Curve" : (useSmartThresholds ? "Smart Scaled" : "Static")
-            def epcsb = peakClearLux ?: 10000
+            def cReason = useDynamicClear ? "Astro-Curve" : (useSmartThresholds ? "Astro-Scaled" : "Static")
+            def expectedNow = getExpectedLuxAtTime(now())
             def dailyMax = state.dailyMaxLux ?: 0
+            
             def vSwitch = targetSwitch ? targetSwitch.currentValue("switch")?.toUpperCase() : "NOT SET"
             def vDim = targetDimmer ? (targetDimmer.currentValue("switch") == "on" ? "${targetDimmer.currentValue('level')}%" : "OFF") : "NOT SET"
 
@@ -60,7 +61,7 @@ def mainPage() {
                     <tr><td colspan="4" class="dash-subhead">Calculated Thresholds</td></tr>
                     <tr><td class="dash-hl">Overcast Drop Target</td><td colspan="3" class="dash-val">${oLimit} lx (${oReason})</td></tr>
                     <tr><td class="dash-hl">Clear Sky Target</td><td colspan="3" class="dash-val">${cLimit} lx (${cReason})</td></tr>
-                    <tr><td class="dash-hl">Expected Peak Baseline</td><td colspan="3" class="dash-val">${epcsb} lx</td></tr>
+                    <tr><td class="dash-hl">Expected Solar Lux Now</td><td colspan="3" class="dash-val">${expectedNow} lx</td></tr>
                     
                     <tr><td colspan="4" class="dash-subhead">Target Outputs</td></tr>
                     <tr><td class="dash-hl">Virtual Switch</td><td colspan="3" class="dash-val"><b>${vSwitch}</b></td></tr>
@@ -125,8 +126,8 @@ def mainPage() {
             }
         }
         
-        section("24-Hour Lux Trend vs. Expected Solar Baseline") {
-            paragraph "<div style='font-size:13px; color:#555; margin-bottom: 10px;'><b>What it does:</b> Draws a local, internet-free chart mapping your actual outdoor sensors against the theoretical clear-sky solar curve to visually identify overcast conditions.</div>"
+        section("24-Hour Lux Trend vs. True Astronomical Curve") {
+            paragraph "<div style='font-size:13px; color:#555; margin-bottom: 10px;'><b>What it does:</b> Draws a local chart mapping your outdoor sensors against the true astronomical solar elevation calculated locally for your coordinates.</div>"
             if (state.luxHistory && state.luxHistory.size() > 2) {
                 paragraph generateLocalLineChart()
             } else {
@@ -135,7 +136,7 @@ def mainPage() {
         }
         
         // --- HIDDEN/COLLAPSIBLE SECTIONS ---
-        
+
         section("<b>1. Application History (Last 20 Events)</b>", hideable: true, hidden: true) {
             if (state.historyLog && state.historyLog.size() > 0) {
                 def logText = state.historyLog.join("<br>")
@@ -171,7 +172,7 @@ def mainPage() {
             paragraph "<div style='font-size:13px; color:#555;'><b>What it does:</b> Establishes your 'Deadband' to prevent the system from rapidly yo-yoing the lights when clouds quickly pass by.</div>"
             
             input "useSmartThresholds", "bool", title: "Enable Smart Threshold Scaling?", defaultValue: true, submitOnChange: true,
-                description: "Automatically scales your Overcast and Clear Sky limits proportionally as the Expected Peak Clear-Sky Brightness changes with the seasons."
+                description: "Automatically scales your limits proportionally as the Expected Peak Clear-Sky Brightness changes with the seasons based on solar elevation."
                 
             input "overcastThreshold", "number", title: "Base Overcast Drop Threshold (Lux)", defaultValue: 2000,
                 description: "If lux drops below this, start the Overcast timer. (Acts as the baseline ratio if Smart Thresholds are enabled)."
@@ -179,11 +180,14 @@ def mainPage() {
             input "clearThreshold", "number", title: "Base Clear Sky Recovery Threshold (Lux)", defaultValue: 4000,
                 description: "If lux rises above this, start the Clear Sky timer. (Acts as the baseline ratio if Smart Thresholds are enabled)."
                 
-            input "debounceTime", "number", title: "Anti-Yo-Yo Debounce Time (Minutes)", defaultValue: 10,
-                description: "How long the sky must stay below/above the threshold before flipping the virtual outputs."
+            input "overcastDebounceTime", "number", title: "Overcast Delay Timer (Minutes)", defaultValue: 5,
+                description: "How long the lux must stay BELOW the threshold before turning lights ON."
                 
-            input "useDynamicClear", "bool", title: "Enable Automatic Time-of-Year & Time-of-Day Adjustments?", defaultValue: true, submitOnChange: true,
-                description: "If enabled, the Clear Sky Recovery Threshold dynamically curves based on solar position and season to prevent evening/winter yo-yoing."
+            input "clearDebounceTime", "number", title: "Clear Sky Delay Timer (Minutes)", defaultValue: 15,
+                description: "How long the lux must stay ABOVE the threshold before turning lights OFF."
+                
+            input "useDynamicClear", "bool", title: "Enable Astronomical Curve Adjustments?", defaultValue: true, submitOnChange: true,
+                description: "If enabled, the Clear Sky Recovery Threshold dynamically curves based on true solar position to prevent evening/winter yo-yoing."
         }
 
         section("<b>4. Universal Darkness (Nighttime Logic)</b>", hideable: true, hidden: true) {
@@ -222,20 +226,22 @@ def mainPage() {
             }
         }
 
-        section("<b>6. Smart Peak Brightness Learning (Solar Baseline)</b>", hideable: true, hidden: true) {
-            paragraph "<div style='font-size:13px; color:#555;'><b>What it does:</b> Automatically tracks daily peak brightness to adapt to changing seasons. It logs the daily max, averages the data, and <b>automatically overwrites</b> the setting below.</div>"
+        section("<b>6. Smart Hardware Learning (Solar Multiplier)</b>", hideable: true, hidden: true) {
+            paragraph "<div style='font-size:13px; color:#555;'><b>What it does:</b> Automatically tracks daily peak brightness to calculate your sensor's specific hardware multiplier. It scales the true astronomical math to perfectly match your sensor limitations and shade conditions without trailing lag.</div>"
             
-            input "useSmartLearning", "bool", title: "Enable Smart Learning Mode", defaultValue: true, submitOnChange: true,
-                description: "Silently drops bad weather days, learns your true solar peak, and automatically updates the Expected Peak setting below."
+            input "useSmartLearning", "bool", title: "Enable Hardware Multiplier Learning", defaultValue: true, submitOnChange: true
                 
-            input "learningDaysReq", "enum", title: "Averaging Window (Days)", options: ["10", "20", "30"], defaultValue: "30", submitOnChange: true,
-                description: "How many days of clear data the app averages together to calculate the true peak."
+            input "learningDaysReq", "enum", title: "Averaging Window (Days)", options: ["10", "20", "30"], defaultValue: "15", submitOnChange: true,
+                description: "How many days of clear data the app averages together to calculate the true hardware multiplier."
 
             input "learningThresholdPct", "number", title: "Smart Learning Minimum Threshold (%)", defaultValue: 80, range: "1..100", submitOnChange: true,
-                description: "Only logs the daily max if it reaches at least this percentage of the historical average. Lower this (e.g., 50%) to be more forgiving, raise it (e.g., 80%) to strictly filter out cloudy days."
+                description: "Only logs the daily max if it reaches at least this percentage of the historical expected peak. This filters out rainy days from the math."
                 
-            input "peakClearLux", "number", title: "Expected Peak Clear-Sky Brightness (Lux)", defaultValue: 10000, submitOnChange: true,
-                description: "<b>[DYNAMIC]</b> This value acts as your manual starting fallback. Once Smart Learning gathers enough data, the app will automatically update this setting for you."
+            input "peakClearLux", "number", title: "Fallback Expected Brightness (Lux)", defaultValue: 10000, submitOnChange: true,
+                description: "<b>[DYNAMIC]</b> Used as a fallback until the AI calculates the hardware multiplier."
+                
+            paragraph "<hr>"
+            input "clearLearnedDataBtn", "button", title: "⚠️ Reset Learned AI Data"
         }
         
         section("<b>7. Proportional Dimming Setup</b>", hideable: true, hidden: true) {
@@ -246,23 +252,6 @@ def mainPage() {
             input "minDimLevel", "number", title: "Min Brightness Level (%)", defaultValue: 20, range: "1..100",
                 description: "The starting brightness when it just barely crosses the Overcast threshold."
             input "nightDimLevel", "number", title: "Nighttime Brightness Level (%)", defaultValue: 100, range: "1..100"
-        }
-        
-        section("<b>8. Math and Algorithm (Under the Hood)</b>", hideable: true, hidden: true) {
-            paragraph "<div style='font-size:14px; color:#333; margin-bottom: 5px;'><b>1. Smart Threshold Scaling</b></div>" +
-                      "<div style='font-size:13px; color:#555;'>Instead of static thresholds, the app calculates a proportional ratio. It divides your Base Overcast Threshold by 10,000 (the standard clear sky assumption) and multiplies it by your Expected Peak Brightness. This ensures the threshold adapts up or down as the seasons change.</div>"
-                      
-            paragraph "<div style='font-size:14px; color:#333; margin-bottom: 5px; margin-top: 15px;'><b>2. Auto-Curve (Dynamic Clear Target)</b></div>" +
-                      "<div style='font-size:13px; color:#555;'>The recovery threshold uses two trigonometric arcs to prevent yo-yoing in the evening or winter:<br>• <b>Time-of-Day Arc:</b> A sine wave spanning from sunrise to sunset, peaking at 1.0 during solar noon.<br>• <b>Seasonal Arc:</b> A cosine wave calculating the current Day of the Year offset against the Summer Solstice. The base threshold is mathematically multiplied by these curves to lower the recovery requirement naturally as the sun drops.</div>"
-
-            paragraph "<div style='font-size:14px; color:#333; margin-bottom: 5px; margin-top: 15px;'><b>3. Logarithmic Dimming</b></div>" +
-                      "<div style='font-size:13px; color:#555;'>Human eyes perceive light intensity logarithmically, not linearly. The proportional dimmer uses a <code>Math.log10</code> equation to calculate the space between your Overcast limit and Storm limit. This maps the dimmer level smoothly, ensuring natural-feeling brightness transitions rather than jarring, linear jumps.</div>"
-
-            paragraph "<div style='font-size:14px; color:#333; margin-bottom: 5px; margin-top: 15px;'><b>4. Predictive Cloud Event Detection</b></div>" +
-                      "<div style='font-size:13px; color:#555;'>The app tracks a rolling 'Recent Peak'. If the ambient lux drops by more than 30% from this peak within a short time window (scaled based on your sensor's reporting interval), it logs a 'Potential Clouding' event. It actively waits to see if the light recovers before officially triggering the Overcast targets, allowing it to differentiate between a passing cloud and a true storm.</div>"
-
-            paragraph "<div style='font-size:14px; color:#333; margin-bottom: 5px; margin-top: 15px;'><b>5. Smart Learning Bad-Weather Filter</b></div>" +
-                      "<div style='font-size:13px; color:#555;'>To learn your true solar baseline, the app logs the maximum lux reading every day. When the sun sets, it evaluates this peak against a percentage of your historical rolling average. If the peak was lower than your configured Minimum Threshold (meaning it was likely a cloudy or rainy day), the data point is discarded. Only clear days are averaged into the permanent memory array.</div>"
         }
     }
 }
@@ -305,7 +294,7 @@ def initialize() {
     state.historyLog = state.historyLog ?: []
     state.luxHistory = state.luxHistory ?: []
     state.cloudHistory = state.cloudHistory ?: []
-    state.peakLuxHistory = state.peakLuxHistory ?: [] 
+    state.multiplierHistory = state.multiplierHistory ?: [] 
     state.dailyMaxLux = state.dailyMaxLux ?: 0
     state.activeCloudEvent = null
     state.currentCondition = "Evaluating..."
@@ -319,15 +308,17 @@ def initialize() {
     state.recentPeakLux = null
     state.recentPeakTime = null
     
-    if (!state.roomData) state.roomData = [:]
+    // Initialize temporary room data to force save
+    def tempRoomData = state.roomData ?: [:]
     def configuredRooms = numRooms ?: 0
     for (int i = 1; i <= configuredRooms; i++) {
-        if (!state.roomData["${i}"]) {
-            state.roomData["${i}"] = [dailyMax: 0, peakHistory: [], currentSetpoint: settings["roomBaseLux_${i}"] ?: 0]
+        if (!tempRoomData["${i}"]) {
+            tempRoomData["${i}"] = [dailyMax: 0, peakHistory: [], currentSetpoint: settings["roomBaseLux_${i}"] ?: 0]
         }
         def rLux = settings["roomLux_${i}"]
         if (rLux) subscribe(rLux, "illuminance", roomLuxHandler)
     }
+    state.roomData = tempRoomData // Commit creation to database
     
     if (primaryLuxSensor) subscribe(primaryLuxSensor, "illuminance", luxHandler)
     if (auxLuxSensor1) subscribe(auxLuxSensor1, "illuminance", luxHandler)
@@ -354,23 +345,115 @@ def appButtonHandler(btn) {
         state.historyLog = []
         log.info "Application history cleared."
     }
+    if (btn == "clearLearnedDataBtn") {
+        state.multiplierHistory = []
+        state.hardwareMultiplier = null
+        state.dailyMaxLux = 0
+        state.recentPeakLux = null
+        
+        def tempRoomData = state.roomData ?: [:]
+        def configuredRooms = numRooms ?: 0
+        for (int i = 1; i <= configuredRooms; i++) {
+            if (tempRoomData["${i}"]) {
+                tempRoomData["${i}"].peakHistory = []
+                tempRoomData["${i}"].dailyMax = 0
+            }
+        }
+        state.roomData = tempRoomData 
+        
+        addToHistory("SYSTEM: Learned AI Peak Data has been manually cleared.")
+        log.info "Learned AI peak data has been manually cleared by the user."
+    }
 }
+
+// --- LOCAL ASTRONOMICAL LOGIC ---
+
+def getSolarElevation(targetTime = new Date().time) {
+    def lat = location.latitude?.toDouble() ?: 0.0
+    if (lat == 0.0) return 0.0
+    
+    def cal = Calendar.getInstance(location.timeZone)
+    cal.setTimeInMillis(targetTime)
+    def dayOfYear = cal.get(Calendar.DAY_OF_YEAR)
+    
+    def declination = 23.45 * Math.sin(Math.toRadians((360.0 / 365.0) * (dayOfYear - 81)))
+    
+    def sunInfo = getSunriseAndSunset()
+    if (!sunInfo || !sunInfo.sunrise || !sunInfo.sunset) return 0.0
+    
+    def sunrise = sunInfo.sunrise.time
+    def sunset = sunInfo.sunset.time
+    
+    if (targetTime < sunrise || targetTime > sunset) return 0.0
+    
+    def solarNoon = sunrise + ((sunset - sunrise) / 2)
+    def hoursFromNoon = (targetTime - solarNoon) / 3600000.0
+    def hourAngle = hoursFromNoon * 15.0
+    
+    def latRad = Math.toRadians(lat)
+    def decRad = Math.toRadians(declination)
+    def haRad = Math.toRadians(hourAngle)
+    
+    def sinAlt = (Math.sin(latRad) * Math.sin(decRad)) + (Math.cos(latRad) * Math.cos(decRad) * Math.cos(haRad))
+    def altitude = Math.toDegrees(Math.asin(sinAlt))
+    
+    return altitude > 0 ? altitude : 0.0
+}
+
+def getExpectedLuxAtTime(timeMillis) {
+    def elevation = getSolarElevation(timeMillis)
+    if (elevation <= 0) return 0
+    
+    // 100,000 lx is standard direct zenith sun
+    def theoreticalMax = 100000 * Math.sin(Math.toRadians(elevation))
+    
+    // Apply learned hardware multiplier (e.g., if sensor maxes at 10k, multiplier is 0.1)
+    def multiplier = state.hardwareMultiplier ?: (peakClearLux ? (peakClearLux / 100000.0) : 0.1)
+    return (theoreticalMax * multiplier).toInteger()
+}
+
+// --- THRESHOLD SCALING ---
 
 def getSmartOvercastThreshold() {
     def baseOver = overcastThreshold ?: 2000
     if (!useSmartThresholds) return baseOver
-    def currentPeak = peakClearLux ?: 10000
-    def ratioBase = (currentPeak > 0) ? currentPeak : 10000 
-    def ratio = baseOver / 10000.0 
-    return (currentPeak * ratio).toInteger()
+    
+    def expectedNow = getExpectedLuxAtTime(now())
+    if (expectedNow <= 0) return baseOver
+    
+    if (expectedNow <= 10000) {
+        def ratio = baseOver / 10000.0 
+        return (expectedNow * ratio).toInteger()
+    }
+    
+    def multiplier = 1.0 + Math.log10(expectedNow / 10000.0)
+    return (baseOver * multiplier).toInteger()
 }
 
 def getSmartClearThreshold() {
     def baseClear = clearThreshold ?: 4000
     if (!useSmartThresholds) return baseClear
-    def currentPeak = peakClearLux ?: 10000
-    def ratio = baseClear / 10000.0
-    return (currentPeak * ratio).toInteger()
+    
+    def expectedNow = getExpectedLuxAtTime(now())
+    if (expectedNow <= 0) return baseClear
+    
+    if (expectedNow <= 10000) {
+        def ratio = baseClear / 10000.0
+        return (expectedNow * ratio).toInteger()
+    }
+    
+    def multiplier = 1.0 + Math.log10(expectedNow / 10000.0)
+    return (baseClear * multiplier).toInteger()
+}
+
+def getDynamicClearThreshold() {
+    def baseClear = getSmartClearThreshold()
+    def baseOvercast = getSmartOvercastThreshold()
+    
+    if (!useDynamicClear) return baseClear
+    
+    def safeMinimum = baseOvercast + 500
+    return Math.max(baseClear, safeMinimum)
 }
 
 def closeActiveCloudEvent() {
@@ -417,11 +500,14 @@ def addToHistory(String msg) {
 }
 
 def roomLuxHandler(evt) {
-    if (state.currentCondition == "Overcast" || state.isNight) return 
+    if (state.isNight) return 
     
     def devId = evt.device.id
     def lux = evt.value.toInteger()
     def configuredRooms = numRooms ?: 0
+    
+    def tempRoomData = state.roomData ?: [:]
+    def stateChanged = false
     
     for (int i = 1; i <= configuredRooms; i++) {
         def rLux = settings["roomLux_${i}"]
@@ -433,16 +519,18 @@ def roomLuxHandler(evt) {
             def lightsOn = lights ? lights.any { it.currentValue("switch") == "on" } : false
             
             if (!shadesClosed && !lightsOn) {
-                def rData = state.roomData ? state.roomData["${i}"] : null
+                def rData = tempRoomData["${i}"]
                 if (rData) {
                     if (lux > (rData.dailyMax ?: 0)) {
                         rData.dailyMax = lux
+                        stateChanged = true
                     }
                 }
             }
             break 
         }
     }
+    if (stateChanged) state.roomData = tempRoomData
 }
 
 def getAggregateLux() {
@@ -453,39 +541,7 @@ def getAggregateLux() {
     def values = sensors.collect { it.currentValue("illuminance")?.toInteger() ?: 0 }
     
     if (values.size() == 0) return 0
-    // With only max 2 sensors, we just perform a direct average without dropping outliers
     return (values.sum() / values.size()).toInteger()
-}
-
-def getDynamicClearThreshold() {
-    def baseClear = getSmartClearThreshold()
-    def baseOvercast = getSmartOvercastThreshold()
-    
-    if (!useDynamicClear) return baseClear
-    
-    def sunInfo = getSunriseAndSunset()
-    if (!sunInfo || !sunInfo.sunrise || !sunInfo.sunset) return baseClear
-    
-    def nowTime = new Date().time
-    def sunrise = sunInfo.sunrise.time
-    def sunset = sunInfo.sunset.time
-    
-    if (nowTime < sunrise || nowTime > sunset) return baseClear
-    
-    def totalDaylightMillis = sunset - sunrise
-    def currentDaylightMillis = nowTime - sunrise
-    def dayPercentage = currentDaylightMillis / totalDaylightMillis
-    def timeMultiplier = Math.sin(dayPercentage * Math.PI)
-    
-    def cal = Calendar.getInstance()
-    def dayOfYear = cal.get(Calendar.DAY_OF_YEAR)
-    def seasonalOffset = ((dayOfYear - 172) / 365.0) * (Math.PI * 2)
-    def seasonMultiplier = 0.7 + (0.3 * Math.cos(seasonalOffset))
-    
-    def dynamicLimit = (baseClear * timeMultiplier * seasonMultiplier).toInteger()
-    def safeMinimum = baseOvercast + 500
-    
-    return Math.max(dynamicLimit, safeMinimum)
 }
 
 def logGraphData() {
@@ -497,22 +553,12 @@ def logGraphData() {
     def s1 = primaryLuxSensor?.currentValue("illuminance")?.toInteger() ?: 0
     def s2 = auxLuxSensor1?.currentValue("illuminance")?.toInteger() ?: 0
     
-    def expectedLux = 0
+    def expectedLux = getExpectedLuxAtTime(nowTime)
+    def overLimit = getSmartOvercastThreshold()
+    def clearLimit = getDynamicClearThreshold()
    
-    def sunInfo = getSunriseAndSunset()
-    if (sunInfo && sunInfo.sunrise && sunInfo.sunset) {
-        def sr = sunInfo.sunrise.time
-        def ss = sunInfo.sunset.time
-        
-        if (nowTime >= sr && nowTime <= ss) {
-            def fraction = (nowTime - sr) / (ss - sr)
-            def peak = peakClearLux ?: 10000
-            expectedLux = (peak * Math.sin(fraction * Math.PI)).toInteger()
-        }
-    }
-    
     if (!state.luxHistory) state.luxHistory = []
-    state.luxHistory.add([time: timestamp, s1: s1, s2: s2, expected: expectedLux])
+    state.luxHistory.add([time: timestamp, s1: s1, s2: s2, expected: expectedLux, overcast: overLimit, clear: clearLimit])
     
     if (state.luxHistory.size() > 96) {
         state.luxHistory = state.luxHistory.drop(1)
@@ -525,7 +571,7 @@ def generateLocalLineChart() {
     def width = 600
     def height = 250
     def maxLux = state.luxHistory.collect { 
-        [it.s1 ?: (it.lux ?: 0), it.s2 ?: 0, it.expected ?: 0].max() 
+        [it.s1 ?: (it.lux ?: 0), it.s2 ?: 0, it.expected ?: 0, it.overcast ?: 0, it.clear ?: 0].max() 
     }.max() ?: 1000
     
     if (maxLux < 1000) maxLux = 1000
@@ -540,9 +586,18 @@ def generateLocalLineChart() {
 
     def makePolyline = { dataKey, color, strokeDash ->
         def pts = []
+        def fallbackOvercast = getSmartOvercastThreshold()
+        def fallbackClear = getDynamicClearThreshold()
+        
         state.luxHistory.eachWithIndex { pt, i ->
             def x = (i * xStep).toInteger()
-            def val = pt[dataKey] ?: (dataKey == 's1' ? (pt.lux ?: 0) : 0)
+            def val = pt[dataKey]
+            if (val == null) {
+                if (dataKey == 's1') val = pt.lux ?: 0
+                else if (dataKey == 'overcast') val = fallbackOvercast
+                else if (dataKey == 'clear') val = fallbackClear
+                else val = 0
+            }
             def y = height - ((val / maxLux) * height).toInteger()
             pts << "${x},${y}"
         }
@@ -553,12 +608,17 @@ def generateLocalLineChart() {
     if (auxLuxSensor1) svg += makePolyline("s2", "rgba(255,99,132,1)", "none")
     
     svg += makePolyline("expected", "rgba(255,159,64,0.8)", "5,5")
+    svg += makePolyline("clear", "rgba(75,192,192,0.8)", "3,3")
+    svg += makePolyline("overcast", "rgba(153,102,255,0.8)", "3,3")
+    
     svg += "</svg>"
     
     def legend = "<div style='font-size:12px; margin-top:8px; text-align:center; font-family:sans-serif;'>"
     if (primaryLuxSensor) legend += "<span style='color:rgba(54,162,235,1); font-weight:bold; margin-right:10px;'>■ Primary</span>"
     if (auxLuxSensor1) legend += "<span style='color:rgba(255,99,132,1); font-weight:bold; margin-right:10px;'>■ Aux 1</span>"
-    legend += "<span style='color:rgba(255,159,64,1); font-weight:bold;'>■ Expected</span>"
+    legend += "<span style='color:rgba(255,159,64,1); font-weight:bold; margin-right:10px;'>■ Astro Expected</span>"
+    legend += "<span style='color:rgba(75,192,192,1); font-weight:bold; margin-right:10px;'>■ Clear Target</span>"
+    legend += "<span style='color:rgba(153,102,255,1); font-weight:bold;'>■ Overcast Target</span>"
     legend += "</div>"
 
     return "<div style='width:100%; max-width:600px; margin:auto;'>${svg}${legend}</div>"
@@ -648,8 +708,10 @@ def updateDimmerLevel(currentLux) {
     }
 }
 
+// THROTTLED LOCAL HANDLER
 def luxHandler(evt) {
-    evaluateLuxCondition()
+    // Collects rapid-fire sensor events locally and evaluates once settled. Protects Hub CPU.
+    runInMillis(2500, "evaluateLuxCondition", [overwrite: true])
 }
 
 def forceImmediateEvaluation() {
@@ -685,9 +747,11 @@ def evaluateLuxCondition() {
     def lux = getAggregateLux()
     def overLimit = getSmartOvercastThreshold()
     def clearLimit = getDynamicClearThreshold()
-    def debounceSecs = (debounceTime ?: 10) * 60
-    def intervalMins = sensorInterval ?: 15
     
+    def overcastDebounceSecs = (overcastDebounceTime ?: 5) * 60
+    def clearDebounceSecs = (clearDebounceTime ?: 15) * 60
+    
+    def intervalMins = sensorInterval ?: 15
     def timeNow = now()
     def timeDeltaMins = state.lastLuxCheckTime ? (timeNow - state.lastLuxCheckTime) / 60000 : 0
     def luxDrop = state.lastLuxValue ? (state.lastLuxValue - lux) : 0
@@ -759,9 +823,9 @@ def evaluateLuxCondition() {
         
         if (!state.pendingOvercast) {
             state.pendingOvercast = true
-            runIn(debounceSecs, "triggerOvercast", [overwrite: true])
+            runIn(overcastDebounceSecs, "triggerOvercast", [overwrite: true])
             def causeStr = (state.dipReason == "Potential Clouding") ? "Monitoring for Storm vs Cloud..." : "Monitoring for Overcast..."
-            addToHistory("Lux dropped to ${lux}. Starting ${(debounceSecs/60).toInteger()}m verification. ${causeStr}")
+            addToHistory("Lux dropped to ${lux}. Starting ${(overcastDebounceSecs/60).toInteger()}m verification. ${causeStr}")
         }
     } 
     else if (lux >= clearLimit && state.currentCondition != "Clear" && state.currentCondition != "Assumed Clear (Boot)") {
@@ -777,8 +841,8 @@ def evaluateLuxCondition() {
         
         if (!state.pendingClear) {
             state.pendingClear = true
-            runIn(debounceSecs, "triggerClear", [overwrite: true])
-            addToHistory("Lux rose to ${lux}. Starting ${(debounceSecs/60).toInteger()}m Clear verification timer.")
+            runIn(clearDebounceSecs, "triggerClear", [overwrite: true])
+            addToHistory("Lux rose to ${lux}. Starting ${(clearDebounceSecs/60).toInteger()}m Clear verification timer.")
         }
     }
     else if (lux > overLimit && lux < clearLimit) {
@@ -865,39 +929,49 @@ def executeSunset() {
   
     if (state.activeCloudEvent) closeActiveCloudEvent()
     
-    def reqDays = (settings.learningDaysReq ?: "30").toInteger()
+    def reqDays = (settings.learningDaysReq ?: "15").toInteger()
     def thresholdPct = (settings.learningThresholdPct ?: 80) / 100.0
     def rejectRuleText = "${settings.learningThresholdPct ?: 80}% minimum threshold rule"
     
-    // --- SMART LEARNING: EVALUATE OUTDOOR DAILY MAX & AUTO-UPDATE INPUT ---
+    // --- SMART LEARNING (LOCAL ASTRONOMICAL MULTIPLIER METHOD) ---
     if (useSmartLearning && state.dailyMaxLux && state.dailyMaxLux > 100) {
-        def baseline = peakClearLux ?: 10000
-        def lowerBound = baseline * thresholdPct 
+        def sunInfo = getSunriseAndSunset()
+        def solarNoon = sunInfo.sunrise.time + ((sunInfo.sunset.time - sunInfo.sunrise.time) / 2)
+        def peakElevation = getSolarElevation(solarNoon)
+        def theoreticalPeakToday = 100000 * Math.sin(Math.toRadians(peakElevation))
         
-        if (state.peakLuxHistory.size() < 3 || state.dailyMaxLux >= lowerBound) {
-            state.peakLuxHistory.add(state.dailyMaxLux)
+        def currentMultiplier = state.hardwareMultiplier ?: (peakClearLux ? (peakClearLux / 100000.0) : 0.1)
+        def expectedWithCurrentMultiplier = theoreticalPeakToday * currentMultiplier
+        def lowerBound = expectedWithCurrentMultiplier * thresholdPct 
+        
+        if (state.multiplierHistory.size() < 3 || state.dailyMaxLux >= lowerBound) {
+            def dailyMultiplier = state.dailyMaxLux / theoreticalPeakToday
+            if (!state.multiplierHistory) state.multiplierHistory = []
+            state.multiplierHistory.add(dailyMultiplier)
             
-            def overflow = state.peakLuxHistory.size() - reqDays
-            if (overflow > 0) state.peakLuxHistory = state.peakLuxHistory.drop(overflow)
+            def overflow = state.multiplierHistory.size() - reqDays
+            if (overflow > 0) state.multiplierHistory = state.multiplierHistory.drop(overflow)
             
-            // Re-calculate the average peak
-            def newLearnedPeak = (state.peakLuxHistory.sum() / state.peakLuxHistory.size()).toInteger()
+            state.hardwareMultiplier = state.multiplierHistory.sum() / state.multiplierHistory.size()
             
-            // DYNAMICALLY OVERWRITE THE USER SETTING IN THE UI
-            app.updateSetting("peakClearLux", [type: "number", value: newLearnedPeak])
+            def expectedPeakTomorrow = (theoreticalPeakToday * state.hardwareMultiplier).toInteger()
+            app.updateSetting("peakClearLux", [type: "number", value: expectedPeakTomorrow])
             
-            log.info "SMART LEARNING (OUTDOOR): Daily max of ${state.dailyMaxLux} lx added. Peak Brightness setting updated to ${newLearnedPeak} lx."
+            log.info "SMART LEARNING (OUTDOOR): Daily max of ${state.dailyMaxLux} lx added. Hardware Multiplier adjusted to ${state.hardwareMultiplier.round(4)}. Baseline updated to ${expectedPeakTomorrow} lx."
         } else {
-            log.info "SMART LEARNING (OUTDOOR): Daily max of ${state.dailyMaxLux} lx rejected (${rejectRuleText})."
+            log.info "SMART LEARNING (OUTDOOR): Daily max of ${state.dailyMaxLux} lx rejected (${rejectRuleText}). Expected was ~${expectedWithCurrentMultiplier.toInteger()} lx."
         }
     }
     state.dailyMaxLux = 0
     
     // --- SMART LEARNING: EVALUATE INDOOR ROOMS & EXPORT HUB VARIABLES ---
     def configuredRooms = numRooms ?: 0
+    def tempRoomData = state.roomData ?: [:]
+    def stateChanged = false
+
     for (int i = 1; i <= configuredRooms; i++) {
-        def rData = state.roomData ? state.roomData["${i}"] : null
-        if (useSmartLearning && rData && rData.dailyMax && rData.dailyMax > 10) { 
+        def rData = tempRoomData["${i}"]
+        if (useSmartLearning && rData && rData.dailyMax && rData.dailyMax >= 5) { 
             def basePeak = settings["roomPeakLux_${i}"] ?: 1000
             def baseTarget = settings["roomBaseLux_${i}"] ?: 100
             
@@ -906,7 +980,7 @@ def executeSunset() {
             
             if (rData.peakHistory.size() < 3 || rData.dailyMax >= rLowerBound) {
                 rData.peakHistory.add(rData.dailyMax)
-               
+                
                 def overflow = rData.peakHistory.size() - reqDays
                 if (overflow > 0) rData.peakHistory = rData.peakHistory.drop(overflow)
                 
@@ -930,7 +1004,14 @@ def executeSunset() {
                 }
             }
         }
-        if (rData) rData.dailyMax = 0
+        if (rData) {
+            rData.dailyMax = 0
+            stateChanged = true
+        }
+    }
+    
+    if (stateChanged) {
+        state.roomData = tempRoomData
     }
     
     state.isNight = true
