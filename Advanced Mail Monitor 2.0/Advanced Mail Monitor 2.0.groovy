@@ -1,10 +1,10 @@
 /**
- * Advanced Mail Manager 2.0
+ * Advanced Mail Monitor 2.0
  *
  * Author: ShaneAllen
  */
 definition(
-    name: "Advanced Mail Manager 2.0",
+    name: "Advanced Mail Monitor 2.0",
     namespace: "ShaneAllen",
     author: "ShaneAllen",
     description: "None",
