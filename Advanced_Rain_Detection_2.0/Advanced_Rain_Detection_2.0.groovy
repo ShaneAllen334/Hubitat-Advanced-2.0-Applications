@@ -113,9 +113,9 @@ def mainPage() {
                       "<b>System Status:</b> ${statusExplanation}</div>"
             
             if (sensorTemp && sensorHum && sensorPress) {
-                def tP = getFloat(sensorTemp, ["temperature", "tempf"])
-                def hP = getFloat(sensorHum, ["humidity"])
-                def pP = getFloat(sensorPress, ["pressure", "Baromrelin", "baromrelin", "Baromabsin", "baromabsin", "barometricPressure"])
+                def tP = getMedianFloat(sensorTemp, ["temperature", "tempf"])
+                def hP = getMedianFloat(sensorHum, ["humidity"])
+                def pP = getMedianFloat(sensorPress, ["pressure", "Baromrelin", "baromrelin", "Baromabsin", "baromabsin", "barometricPressure"])
                 if (pP != null) pP += (settings.pressOffset ?: 0.0)
                 
                 def t = tP ?: 0.0
@@ -126,19 +126,21 @@ def mainPage() {
                     t = state.smoothedTemp
                 }
 
-                def r = getFloat(sensorRain, ["rainRate", "hourlyrainin", "precipRate", "hourlyRain"], 0.0)
+                def r = getMedianFloat(sensorRain, ["rainRate", "hourlyrainin", "precipRate", "hourlyRain"], 0.0)
                 
                 def lux = 0.0
                 if (sensorLux) {
-                    if (sensorLux.currentValue("illuminance") != null) {
-                        lux = getFloat(sensorLux, ["illuminance"], 0.0)
-                    } else if (sensorLux.currentValue("solarRadiation") != null || sensorLux.currentValue("solarradiation") != null) {
-                        lux = getFloat(sensorLux, ["solarRadiation", "solarradiation"], 0.0) * 126.7
+                    def illVal = getMedianFloat(sensorLux, ["illuminance"], null)
+                    if (illVal != null) {
+                        lux = illVal
+                    } else {
+                        def radVal = getMedianFloat(sensorLux, ["solarRadiation", "solarradiation"], null)
+                        if (radVal != null) lux = radVal * 126.7
                     }
                 }
                 
-                def wind = getFloat(sensorWind, ["windSpeed", "windspeedmph", "wind"], "N/A")
-                def windDir = getFloat(sensorWindDir, ["windDirection", "winddir", "windDir"], "N/A")
+                def wind = getMedianFloat(sensorWind, ["windSpeed", "windspeedmph", "wind"], "N/A")
+                def windDir = getMedianFloat(sensorWindDir, ["windDirection", "winddir", "windDir"], "N/A")
        
                 def strikes = state.recentStrikes ?: 0
                 def recentLightDist = 999.0
@@ -148,7 +150,7 @@ def mainPage() {
                 def recentLightDistStr = strikes > 0 ? recentLightDist : "N/A"
                 def lightVector = state.lightningVectorStr ?: "Gathering Data"
                 
-                def rainWeek = getFloat(sensorRainWeekly, ["rainWeekly", "weeklyrainin", "weeklyWater"], 0.0)
+                def rainWeek = getMedianFloat(sensorRainWeekly, ["rainWeekly", "weeklyrainin", "weeklyWater"], 0.0)
                 
                 def wetCountRaw = [sensorLeak, sensorLeak2, sensorLeak3].count { it?.currentValue("water") == "wet" }
                 def reqWets = settings.leakSensorRequiredCount ? settings.leakSensorRequiredCount.toInteger() : 1
@@ -158,6 +160,7 @@ def mainPage() {
                 def ah = state.currentAH ?: 0.0
                 def dp = state.currentDewPoint ?: 0.0
                 def wb = state.currentWetBulb ?: 0.0
+                def lcl = state.cloudBaseMeters ?: 0.0
                 def dpSpread = state.dewPointSpread ?: 0.0
                 def pTrend = state.pressureTrendStr ?: "Stable"
                 def tTrend = state.tempTrendStr ?: "Stable"
@@ -177,8 +180,12 @@ def mainPage() {
 
                 def currentMultiplier = state.calibrationMultiplier ?: 1.0
                 def calibWarning = ""
-                if (settings.enableAutoCalibration != false && currentMultiplier < 1.0) {
-                    calibWarning = "<br><span style='color: #856404; font-size: 11px;'>⚠ Auto-Cal Penalty (${currentMultiplier}x) applied due to past false positives.</span>"
+                if (settings.enableAutoCalibration != false) {
+                    if (currentMultiplier < 1.0) {
+                        calibWarning = "<br><span style='color: #856404; font-size: 11px;'>⚠ Global Auto-Cal Penalty (${String.format('%.2f', currentMultiplier)}x) applied due to past false positives.</span>"
+                    } else if (currentMultiplier > 1.0) {
+                        calibWarning = "<br><span style='color: green; font-size: 11px;'>⬈ Global Auto-Cal Bonus (${String.format('%.2f', currentMultiplier)}x) applied due to past missed rain.</span>"
+                    }
                 }
 
                 def speedUnit = isMetric() ? "km/h" : "mph"
@@ -197,12 +204,25 @@ def mainPage() {
                     lightStr = "${strikes} strikes (3hr) | Closest: ${recentLightDistStr} ${distUnit} | <span style='color:${vecColor}; font-weight:bold;'>${lightVector}</span>"
                 }
        
-                def leakWetStr = "DRY"
-                if (sensorLeak || sensorLeak2 || sensorLeak3) {
-                    if (state.dewRejectionActive) leakWetStr = "<span style='color:orange; font-weight:bold;'>DEW/IGNORED</span>"
-                    else if (state.stuckLeakActive && rawLeakWet) leakWetStr = "<span style='color:orange; font-weight:bold;'>STUCK/IGNORED</span>"
-                    else if (state.leakWetVerifying) leakWetStr = "<span style='color:purple; font-weight:bold;'>VERIFYING (60s)</span>"
-                    else if (rawLeakWet) leakWetStr = "<span style='color:blue; font-weight:bold;'>WET</span>"
+                def totalLeakSensors = [sensorLeak, sensorLeak2, sensorLeak3].count { it != null }
+                def leakWetStr = "Not Configured"
+                
+                if (totalLeakSensors > 0) {
+                    def activeSensorsText = "${wetCountRaw} of ${totalLeakSensors} WET"
+                    
+                    if (!rawLeakWet) {
+                        leakWetStr = "<span style='color:green;'>DRY</span> <span style='font-size:11px; color:gray;'>(${activeSensorsText} - Requires ${reqWets})</span>"
+                    } else {
+                        if (state.dewRejectionActive) {
+                            leakWetStr = "<span style='color:orange; font-weight:bold;'>IGNORED</span> <span style='font-size:11px; color:gray;'>(Physical: ${activeSensorsText} | Reason: Dew/Frost conditions detected)</span>"
+                        } else if (state.stuckLeakActive) {
+                            leakWetStr = "<span style='color:orange; font-weight:bold;'>IGNORED</span> <span style='font-size:11px; color:gray;'>(Physical: ${activeSensorsText} | Reason: Stuck WET timeout without rain gauge confirmation)</span>"
+                        } else if (state.leakWetVerifying) {
+                            leakWetStr = "<span style='color:purple; font-weight:bold;'>VERIFYING</span> <span style='font-size:11px; color:gray;'>(Physical: ${activeSensorsText} | Reason: Waiting 60s to confirm real drop vs debris)</span>"
+                        } else {
+                            leakWetStr = "<span style='color:blue; font-weight:bold;'>TRIGGERED</span> <span style='font-size:11px; color:gray;'>(Physical: ${activeSensorsText} | Reason: Valid instant rain verified)</span>"
+                        }
+                    }
                 }
                 
                 def vpdColor = vpd < 0.5 ? "red" : (vpd < 1.0 ? "orange" : "green")
@@ -231,16 +251,23 @@ def mainPage() {
                         <tr><td class="dash-hl">Estimated Clear Time</td><td colspan="2" class="dash-val">${clearTime}</td></tr>
                         <tr><td class="dash-hl">Active Logic Triggers</td><td colspan="2" class="dash-val" style="font-size:12px;"><i>${reasoning}</i></td></tr>
 
-                        <tr><td colspan="3" class="dash-subhead">Core Environmental Sensors</td></tr>
+                        <tr><td colspan="3" class="dash-subhead">Engine Accuracy & Machine Learning Tracking</td></tr>
+                        <tr><td class="dash-hl">False Positives (Cried Wolf)</td><td colspan="2" class="dash-val"><span style='color:orange; font-weight:bold;'>${state.falsePositiveCount ?: 0}</span> <i style='font-size:11px; color:gray;'>(Penalizes specific modules)</i></td></tr>
+                        <tr><td class="dash-hl">Missed Rain (Failed Alert)</td><td colspan="2" class="dash-val"><span style='color:red; font-weight:bold;'>${state.falseNegativeCount ?: 0}</span> <i style='font-size:11px; color:gray;'>(Boosts global sensitivity)</i></td></tr>
+                        <tr><td class="dash-hl">Time-Healing (Decay)</td><td colspan="2" class="dash-val"><b>Active</b> <i style='font-size:11px; color:gray;'>(All penalties/bonuses shrink 2% toward 1.0x daily)</i></td></tr>
+
+                        <tr><td colspan="3" class="dash-subhead">Core Environmental Sensors (Aggregated)</td></tr>
                         <tr><td class="dash-hl">Temperature</td><td><b>${String.format('%.1f', t)}°</b></td><td>${tTrend}</td></tr>
                         <tr><td class="dash-hl">Humidity</td><td><b>${String.format('%.1f', h)}%</b></td><td>Abs Hum: ${String.format('%.2f', ah)} g/m³ (${ahTrend})</td></tr>
                         <tr><td class="dash-hl">Barometric Pressure</td><td><b>${String.format('%.2f', p)}</b></td><td>${pTrend}</td></tr>
-                        <tr><td class="dash-hl">Rain Gauge Rate</td><td><b>${r}/hr</b></td><td>Instant Drop Sensor: <b>${leakWetStr}</b></td></tr>
+                        <tr><td class="dash-hl">Rain Gauge Rate</td><td colspan="2" class="dash-val"><b>${r}/hr</b></td></tr>
+                        <tr><td class="dash-hl">First Drop Sensor(s)</td><td colspan="2" class="dash-val">${leakWetStr}</td></tr>
                         <tr><td class="dash-hl">Solar Radiation</td><td colspan="2" class="dash-val">${solarExpectedStr}</td></tr>
                         <tr><td class="dash-hl">Wind Dynamics</td><td>${wind != "N/A" ? wind + " " + speedUnit : "--"} @ ${windDir != "N/A" ? windDir + "°" : "--"}</td><td>Shift: ${state.windShiftDetected ? "<span style='color:red;'>Active Front</span>" : "Stable"}</td></tr>
                         <tr><td class="dash-hl">Lightning Vectoring</td><td colspan="2" class="dash-val">${lightStr}</td></tr>
 
                         <tr><td colspan="3" class="dash-subhead">Thermodynamic Calculations</td></tr>
+                        <tr><td class="dash-hl">Cloud Base (LCL)</td><td colspan="2" class="dash-val"><b>~${Math.round(lcl)}m</b></td></tr>
                         <tr><td class="dash-hl">VPD (Drying Power)</td><td><span style='color:${vpdColor}; font-weight:bold;'>${String.format('%.2f', vpd)} kPa</span></td><td class="dash-val">${dryingRate}</td></tr>
                         <tr><td class="dash-hl">Dew Point Spread</td><td><span style='color:${spreadColor}; font-weight:bold;'>${String.format('%.1f', dpSpread)}°</span></td><td>Convergence: ${sTrend}</td></tr>
                         <tr><td class="dash-hl">Wet-Bulb Temp</td><td colspan="2" class="dash-val">${String.format('%.1f', wb)}°</td></tr>
@@ -318,15 +345,16 @@ def mainPage() {
         }
 
         section("<b>1. Primary Environment Sensors (Required)</b>", hideable: true, hidden: true) {
-            input "sensorTemp", "capability.sensor", title: "Outdoor Temperature Sensor", required: true
-            input "sensorHum", "capability.sensor", title: "Outdoor Humidity Sensor", required: true
-            input "sensorPress", "capability.sensor", title: "Barometric Pressure Sensor", required: true
+            input "sensorTemp", "capability.sensor", title: "Outdoor Temperature Sensor(s)", required: true, multiple: true
+            input "sensorHum", "capability.sensor", title: "Outdoor Humidity Sensor(s)", required: true, multiple: true
+            input "sensorPress", "capability.sensor", title: "Barometric Pressure Sensor(s)", required: true, multiple: true
+            paragraph "<span style='font-size: 12px; color: #555;'><i>Tip: Select multiple sensors here. The app will automatically discard extreme outliers and use the mathematical median for highest accuracy.</i></span>"
         }
 
         section("<b>2. Advanced Prediction Sensors (Optional)</b>", hideable: true, hidden: true) {
-            input "sensorLux", "capability.illuminanceMeasurement", title: "Solar Radiation / Lux Sensor", required: false
-            input "sensorWind", "capability.sensor", title: "Wind Speed Sensor", required: false
-            input "sensorWindDir", "capability.sensor", title: "Wind Direction Sensor", required: false
+            input "sensorLux", "capability.illuminanceMeasurement", title: "Solar Radiation / Lux Sensor(s)", required: false, multiple: true
+            input "sensorWind", "capability.sensor", title: "Wind Speed Sensor(s)", required: false, multiple: true
+            input "sensorWindDir", "capability.sensor", title: "Wind Direction Sensor(s)", required: false, multiple: true
             input "sensorLightning", "capability.sensor", title: "Lightning Detector", required: false
             if (sensorLightning) {
                 input "lightningStrikeThreshold", "number", title: "Minimum Lightning Strikes", defaultValue: 10
@@ -334,8 +362,8 @@ def mainPage() {
         }
         
         section("<b>3. Precipitation & Accumulation Sensors (Optional)</b>", hideable: true, hidden: true) {
-            input "sensorRain", "capability.sensor", title: "Rain Rate Sensor", required: false
-            input "sensorRainDaily", "capability.sensor", title: "Daily Rain Accumulation Sensor", required: false
+            input "sensorRain", "capability.sensor", title: "Rain Rate Sensor(s)", required: false, multiple: true
+            input "sensorRainDaily", "capability.sensor", title: "Daily Rain Accumulation Sensor(s)", required: false, multiple: true
             input "sensorRainWeekly", "capability.sensor", title: "Weekly Rain Accumulation Sensor", required: false
         }
 
@@ -349,7 +377,8 @@ def mainPage() {
         
         section("<b>5. Algorithm Tuning & Toggles</b>", hideable: true, hidden: true) {
             input "pressOffset", "decimal", title: "Barometric MSLP Offset (inHg)<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Calibrates raw station pressure to Mean Sea Level Pressure (MSLP) to ensure an accurate atmospheric baseline.</span>", defaultValue: 0.0
-            input "enableAutoCalibration", "bool", title: "Dynamic Auto-Calibration<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Automatically applies a probability penalty if multiple false positives are detected without actual rain.</span>", defaultValue: true
+            input "enableLCLLogic", "bool", title: "Cloud Base Height (LCL) Virga Detection<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Calculates the lifting condensation level. Penalizes probability if the cloud base is too high, causing rain to evaporate before reaching the ground.</span>", defaultValue: true
+            input "enableAutoCalibration", "bool", title: "Machine-Learning Auto-Calibration<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Tracks false alarms. Specifically identifies and penalizes the exact logic modules that caused the false positive to tune the system to your microclimate.</span>", defaultValue: true
             input "enableSeasonalProfiling", "bool", title: "Seasonal Storm Profiling<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Adjusts probability multipliers based on temperature profiles (e.g., convective pop-up storms vs stratiform frontal rain).</span>", defaultValue: true
             input "enableAccelerationLogic", "bool", title: "Pressure Acceleration<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Detects rapid accelerations in barometric pressure drops, often preceding severe squalls.</span>", defaultValue: true
             input "enableAbsHumLogic", "bool", title: "Moisture Advection<br><span style='font-size: 12px; color: #555; font-weight: normal;'>Calculates the physical mass of water in the air to detect incoming deep moisture systems.</span>", defaultValue: true
@@ -451,8 +480,14 @@ def initialize() {
     
     if (!state.algoDiagnostics) state.algoDiagnostics = []
     
-    if (!state.falsePositiveCount) state.falsePositiveCount = 0
-    if (!state.calibrationMultiplier) state.calibrationMultiplier = 1.0
+    if (state.falsePositiveCount == null) state.falsePositiveCount = 0
+    if (state.falseNegativeCount == null) state.falseNegativeCount = 0
+    if (state.calibrationMultiplier == null) state.calibrationMultiplier = 1.0
+    if (state.algoWeights == null) state.algoWeights = [:]
+    if (state.activeModulesThisPrediction == null) state.activeModulesThisPrediction = []
+    
+    if (state.activePrediction == null) state.activePrediction = false
+    if (state.rainOccurredDuringPrediction == null) state.rainOccurredDuringPrediction = false
     state.probableStartTime = null
     state.probThresholdCrossedTime = null
     
@@ -504,11 +539,15 @@ def initialize() {
 
 def isMetric() { return location?.temperatureScale == "C" }
 
-def subscribeMulti(device, attrs, handler) {
-    if (!device) return
-    attrs.each { attr -> subscribe(device, attr, handler) }
+def subscribeMulti(devices, attrs, handler) {
+    if (!devices) return
+    def devList = devices instanceof List ? devices : [devices]
+    devList.each { dev ->
+        attrs.each { attr -> subscribe(dev, attr, handler) }
+    }
 }
 
+// Fallback logic for single hardware sensors like lightning
 def getFloat(device, attrs, fallbackStr = null) {
     if (!device) return fallbackStr
     for (attr in attrs) {
@@ -518,6 +557,35 @@ def getFloat(device, attrs, fallbackStr = null) {
         }
     }
     return fallbackStr
+}
+
+// Median filter for multiple sensors to reject outliers automatically
+def getMedianFloat(devices, attrs, fallbackStr = null) {
+    if (!devices) return fallbackStr
+    def vals = []
+    def devList = devices instanceof List ? devices : [devices]
+    
+    devList.each { dev ->
+        for (attr in attrs) {
+            def val = dev.currentValue(attr)
+            if (val != null) {
+                try { 
+                    vals << val.toString().replaceAll("[^\\d.-]", "").toFloat()
+                    break // Stop iterating attrs for this specific device if we got a valid reading
+                } catch (e) {}
+            }
+        }
+    }
+    
+    if (vals.size() == 0) return fallbackStr
+    if (vals.size() == 1) return vals[0]
+    
+    vals.sort()
+    if (vals.size() % 2 == 0) {
+        return (vals[(vals.size().intdiv(2)) - 1] + vals[vals.size().intdiv(2)]) / 2.0
+    } else {
+        return vals[vals.size().intdiv(2)]
+    }
 }
 
 def queueEval() {
@@ -571,8 +639,15 @@ void appButtonHandler(btn) {
         
         state.notifiedProb = false
         state.alertPending = false
+        
         state.falsePositiveCount = 0
+        state.falseNegativeCount = 0
         state.calibrationMultiplier = 1.0
+        state.algoWeights = [:]
+        state.activeModulesThisPrediction = []
+        state.activePrediction = false
+        state.rainOccurredDuringPrediction = false
+        
         state.probableStartTime = null
         state.probThresholdCrossedTime = null
         state.lastRainEndTime = null
@@ -814,11 +889,32 @@ def evaluateWeather() {
             state.recordRain = [date: state.currentDateStr, amount: yesterdayTotal]
             logAction("🏆 New All-Time Record Rainfall! ${yesterdayTotal} on ${state.currentDateStr}")
         }
+        
+        // --- TIME-HEALING DECAY LOGIC (Daily Reset) ---
+        if (settings.enableAutoCalibration != false) {
+            def gMult = state.calibrationMultiplier ?: 1.0
+            if (gMult > 1.0) state.calibrationMultiplier = Math.max(1.0, gMult - 0.02)
+            else if (gMult < 1.0) state.calibrationMultiplier = Math.min(1.0, gMult + 0.02)
+            
+            def healedMods = []
+            if (state.algoWeights) {
+                state.algoWeights.each { k, v ->
+                    if (v < 1.0) {
+                        state.algoWeights[k] = Math.min(1.0, v + 0.02)
+                        healedMods << k
+                    }
+                }
+            }
+            if (healedMods.size() > 0 || gMult != 1.0) {
+                logAction("Time-Healing: Daily decay applied to multipliers toward baseline 1.0x.")
+            }
+        }
+        
         state.currentDateStr = todayStr
         state.currentDayRain = 0.0
     }
  
-    def currentDaily = getFloat(sensorRainDaily, ["rainDaily", "dailyrainin", "water", "dailyWater"], 0.0)
+    def currentDaily = getMedianFloat(sensorRainDaily, ["rainDaily", "dailyrainin", "water", "dailyWater"], 0.0)
     if (currentDaily > (state.currentDayRain ?: 0.0)) {
        state.currentDayRain = currentDaily
     }
@@ -829,9 +925,9 @@ def evaluateWeather() {
     def isStale = (settings.enableStaleCheck != false) && ((now() - (state.lastHeartbeat ?: now())) > (staleMins * 60000))
     state.isStale = isStale
     
-    def t = getFloat(sensorTemp, ["temperature", "tempf"])
-    def h = getFloat(sensorHum, ["humidity"])
-    def p = getFloat(sensorPress, ["pressure", "Baromrelin", "baromrelin", "Baromabsin", "baromabsin", "barometricPressure"])
+    def t = getMedianFloat(sensorTemp, ["temperature", "tempf"])
+    def h = getMedianFloat(sensorHum, ["humidity"])
+    def p = getMedianFloat(sensorPress, ["pressure", "Baromrelin", "baromrelin", "Baromabsin", "baromabsin", "barometricPressure"])
     
     if (p != null) p += (settings.pressOffset ?: 0.0)
     
@@ -878,21 +974,23 @@ def evaluateWeather() {
         state.smoothedTemp = t
     }
 
-    def r = getFloat(sensorRain, ["rainRate", "hourlyrainin", "precipRate", "hourlyRain"], 0.0)
+    def r = getMedianFloat(sensorRain, ["rainRate", "hourlyrainin", "precipRate", "hourlyRain"], 0.0)
     
     def luxVal = 0.0
     if (sensorLux) {
-        if (sensorLux.currentValue("illuminance") != null) {
-            luxVal = getFloat(sensorLux, ["illuminance"], 0.0)
-        } else if (sensorLux.currentValue("solarRadiation") != null || sensorLux.currentValue("solarradiation") != null) {
-            def rad = getFloat(sensorLux, ["solarRadiation", "solarradiation"], 0.0)
-            luxVal = rad * 126.7 // Convert W/m² to Lux
+        def illVal = getMedianFloat(sensorLux, ["illuminance"], null)
+        if (illVal != null) {
+            luxVal = illVal
+        } else {
+            def radVal = getMedianFloat(sensorLux, ["solarRadiation", "solarradiation"], null)
+            if (radVal != null) luxVal = radVal * 126.7
+            else luxVal = 0.0
         }
     }
     
-    def windVal = getFloat(sensorWind, ["windSpeed", "windspeedmph", "wind"], 0.0)
-    def windGustVal = getFloat(sensorWind, ["windGust", "windgustmph"], windVal)
-    def windDirVal = getFloat(sensorWindDir, ["windDirection", "winddir", "windDir"], 0.0)
+    def windVal = getMedianFloat(sensorWind, ["windSpeed", "windspeedmph", "wind"], 0.0)
+    def windGustVal = getMedianFloat(sensorWind, ["windGust", "windgustmph"], windVal)
+    def windDirVal = getMedianFloat(sensorWindDir, ["windDirection", "winddir", "windDir"], 0.0)
     
     def lightDist = getFloat(sensorLightning, ["lightningDistance", "distance"], 999.0)
     
@@ -935,6 +1033,13 @@ def evaluateWeather() {
     def ah = calculateAbsoluteHumidity(t, h)
     state.currentAH = ah
     updateHistory("ahHistory", ah, 86400000)
+    
+    // Cloud Base Calculation (LCL)
+    def tC_LCL = isMetric() ? t : (t - 32.0) * (5.0 / 9.0)
+    def dpC_LCL = isMetric() ? dp : (dp - 32.0) * (5.0 / 9.0)
+    def lclMeters = 125.0 * (tC_LCL - dpC_LCL)
+    if (lclMeters < 0) lclMeters = 0
+    state.cloudBaseMeters = lclMeters
     
     def dpSpread = t - dp
     if (dpSpread < 0) dpSpread = 0.0
@@ -1082,6 +1187,24 @@ def evaluateWeather() {
     def th_dpPulse = metric ? 23.3 : 74.0 
     def isPulsePowderKeg = (t >= th_tPulse && dp >= th_dpPulse && pTrendData.rate > -0.04 && windVal < 15.0)
 
+    if (state.algoWeights == null) state.algoWeights = [:]
+
+    // ML Auto-Caliberation Helper
+    def applyWeight = { name, addedVal ->
+        if (addedVal <= 0 || settings.enableAutoCalibration == false) return addedVal
+        def weights = state.algoWeights ?: [:]
+        def w = weights[name] != null ? weights[name] : 1.0
+        if (w < 1.0 && addedVal > 0) return Math.round(addedVal * w)
+        return addedVal
+    }
+    def recordDiag = { name, addedVal, msg ->
+        def weights = state.algoWeights ?: [:]
+        def w = weights[name] != null ? weights[name] : 1.0
+        def effStr = addedVal > 0 ? "+${addedVal}%" : "0%"
+        if (w < 1.0 && addedVal > 0) effStr += " <span style='color:orange;'>(x${String.format('%.2f', w)} penalty)</span>"
+        diagList << [name: name, status: "ON", effect: effStr, desc: msg]
+    }
+
     // Evaluate probability ONLY if not currently raining and not in cooldown
     if (!isStale && !state.hardwareAnomalyActive && state.weatherState == "Clear" && !isPostRainSuppressed) {
         
@@ -1094,6 +1217,18 @@ def evaluateWeather() {
         def solarPlungeDetected = false
         def gustFactorDetected = false
 
+        if (settings.enableLCLLogic != false) {
+            totalModelsEnabled++
+            def added = 0
+            def msg = "Stable (Cloud Base: ~${Math.round(lclMeters)}m)"
+            if (lclMeters > 2500) {
+                added -= 20
+                msg = "Cloud base extremely high (>2500m). Strong Virga (Evaporation) penalty applied."
+            }
+            diagList << [name: "Cloud Base Height (LCL)", status: "ON", effect: added == 0 ? "0%" : "${added}%", desc: msg]
+            probability += added
+        } else { diagList << [name: "Cloud Base Height (LCL)", status: "OFF", effect: "--", desc: "Disabled"] }
+
         if (settings.enableDPLogic != false) {
             totalModelsEnabled++
             def added = 0
@@ -1101,20 +1236,20 @@ def evaluateWeather() {
             if (dpSpread <= spreadCrit) { 
                 added += isMorningRadiationalCooling ? 15 : 40; 
                 msg = isMorningRadiationalCooling ? "Critical: Air Saturated (Morning Suppressed)" : "Critical: Air Saturated"; 
-                activeFactors++; activeFactorNames << "Dew Point" 
+                activeFactors++; activeFactorNames << "Dew Point Convergence" 
             }
             else if (dpSpread <= spreadTight) { 
                 added += isMorningRadiationalCooling ? 5 : 20; 
                 msg = isMorningRadiationalCooling ? "Spread tightening (Morning Suppressed)" : "Spread tightening"; 
-                activeFactors++; activeFactorNames << "Dew Point" 
+                activeFactors++; activeFactorNames << "Dew Point Convergence" 
             }
             if (sTrendData.rate <= sTrendRapid) { 
                 added += isMorningRadiationalCooling ? 10 : 30; 
                 msg += " | Rapid Convergence" + (isMorningRadiationalCooling ? " (Suppressed)" : ""); 
-                activeFactors++; activeFactorNames << "Squeeze Velocity" 
+                activeFactors++; activeFactorNames << "Dew Point Convergence" 
             }
-            
-            diagList << [name: "Dew Point Convergence", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+            added = applyWeight("Dew Point Convergence", added)
+            recordDiag("Dew Point Convergence", added, msg)
             probability += added
         } else { diagList << [name: "Dew Point Convergence", status: "OFF", effect: "--", desc: "Disabled"] }
         
@@ -1127,7 +1262,8 @@ def evaluateWeather() {
                 msg = "Rising humidity with falling pressure"
                 activeFactors++; activeFactorNames << "Moisture Advection"
             }
-            diagList << [name: "Moisture Advection", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+            added = applyWeight("Moisture Advection", added)
+            recordDiag("Moisture Advection", added, msg)
             probability += added
         } else { diagList << [name: "Moisture Advection", status: "OFF", effect: "--", desc: "Disabled"] }
         
@@ -1149,9 +1285,10 @@ def evaluateWeather() {
                     added -= 20; msg = "VPD High (Dry air penalty maintained: Solar overrides strikes)" 
                 }
             }
-            diagList << [name: "Vapor Pressure Deficit (VPD)", status: "ON", effect: added == 0 ? "0%" : (added > 0 ? "+${added}%" : "${added}%"), desc: msg]
+            added = applyWeight("VPD", added)
+            recordDiag("VPD", added, msg)
             probability += added
-        } else { diagList << [name: "Vapor Pressure Deficit (VPD)", status: "OFF", effect: "--", desc: "Disabled"] }
+        } else { diagList << [name: "VPD", status: "OFF", effect: "--", desc: "Disabled"] }
         
         if (settings.enableWetBulbLogic != false) {
             totalModelsEnabled++
@@ -1160,7 +1297,8 @@ def evaluateWeather() {
             if (tTrendData.rate <= tTrendSevere && (t - wb) <= wbDiff) { 
                 added += 40; msg = "Rain Shaft Detected! Temp crashing toward WB"; activeFactors++; activeFactorNames << "Wet-Bulb Cooling" 
             }
-            diagList << [name: "Wet-Bulb Cooling", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+            added = applyWeight("Wet-Bulb Cooling", added)
+            recordDiag("Wet-Bulb Cooling", added, msg)
             probability += added
         } else { diagList << [name: "Wet-Bulb Cooling", status: "OFF", effect: "--", desc: "Disabled"] }
         
@@ -1170,20 +1308,21 @@ def evaluateWeather() {
             def msg = "Stable (Trend: ${pTrendData.str})"
             if (pTrendData.rate <= pDropSevere) { 
                 if (isPressureVerified) {
-                    added += 30; msg = "Pressure dropping rapidly"; activeFactors++; activeFactorNames << "Barometric"
+                    added += 30; msg = "Pressure dropping rapidly"; activeFactors++; activeFactorNames << "Barometric Pressure Trends"
                 } else {
                     msg = "Pressure dropping rapidly (Verifying HVAC/Door anomaly...)"
                 }
             }
             else if (pTrendData.rate <= pDropMod) { 
                 if (isPressureVerified) {
-                    added += 15; msg = "Pressure falling"; activeFactors++; activeFactorNames << "Barometric" 
+                    added += 15; msg = "Pressure falling"; activeFactors++; activeFactorNames << "Barometric Pressure Trends" 
                 } else {
                     msg = "Pressure falling (Verifying HVAC/Door anomaly...)"
                 }
             }
             else if (pTrendData.rate > pRiseStrong) { added -= 30; msg = "Pressure rising strongly (Clearing)" }
-            diagList << [name: "Barometric Pressure Trends", status: "ON", effect: added == 0 ? "0%" : (added > 0 ? "+${added}%" : "${added}%"), desc: msg]
+            added = applyWeight("Barometric Pressure Trends", added)
+            recordDiag("Barometric Pressure Trends", added, msg)
             probability += added
         } else { diagList << [name: "Barometric Pressure Trends", status: "OFF", effect: "--", desc: "Disabled"] }
         
@@ -1193,12 +1332,13 @@ def evaluateWeather() {
             def msg = "Stable (Accel: ${String.format('%.2f', pAccel)})"
             if (pAccel <= pAccelSevere) { 
                 if (isPressureVerified) {
-                    added += 25; msg = "Drop velocity is drastically accelerating (Squall)"; activeFactors++; activeFactorNames << "P-Accel" 
+                    added += 25; msg = "Drop velocity is drastically accelerating (Squall)"; activeFactors++; activeFactorNames << "Pressure Acceleration" 
                 } else {
                     msg = "Drop velocity accelerating (Verifying HVAC/Door anomaly...)"
                 }
             }
-            diagList << [name: "Pressure Acceleration", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+            added = applyWeight("Pressure Acceleration", added)
+            recordDiag("Pressure Acceleration", added, msg)
             probability += added
         } else { diagList << [name: "Pressure Acceleration", status: "OFF", effect: "--", desc: "Disabled"] }
         
@@ -1216,13 +1356,14 @@ def evaluateWeather() {
                         if (tTrendData.rate > 0 && windGustVal < 10) {
                             msg += " (Blocked: Shadow Rejection Active)"
                         } else {
-                            added += 25; msg += " (Severe blocking)"; activeFactors++; activeFactorNames << "Astro-Solar" 
+                            added += 25; msg += " (Severe blocking)"; activeFactors++; activeFactorNames << "Astronomical Solar" 
                         }
                     }
                 } else {
                     msg = "Sun too low for modeling (Elev: ${Math.round(el)}°)"
                 }
-                diagList << [name: "Astronomical Solar", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Astronomical Solar", added)
+                recordDiag("Astronomical Solar", added, msg)
                 probability += added
             } else if (settings.enableCloudLogic != false) {
                 totalModelsEnabled++
@@ -1233,10 +1374,11 @@ def evaluateWeather() {
                     def recentPeak = state.luxHistory.max { it.value as Float }?.value as Float ?: 0.0
                     msg = "Tracking local peak (${Math.round(recentPeak)})"
                     if (recentPeak > 15000 && luxVal < (recentPeak * 0.35)) {
-                        added += 20; msg = "Severe solar drop during peak hours"; activeFactors++; activeFactorNames << "Solar"
+                        added += 20; msg = "Severe solar drop during peak hours"; activeFactors++; activeFactorNames << "Basic Cloud Logic"
                     }
                 }
-                diagList << [name: "Basic Cloud Logic", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Basic Cloud Logic", added)
+                recordDiag("Basic Cloud Logic", added, msg)
                 probability += added
             }
             
@@ -1263,11 +1405,11 @@ def evaluateWeather() {
                                 if (isPulsePowderKeg) {
                                     added += 25
                                     msg = "Pulse Storm Initiation! Plunge in extreme heat/humidity."
-                                    activeFactors++; activeFactorNames << "Pulse Storm (Solar)"
+                                    activeFactors++; activeFactorNames << "Solar Plunge Velocity"
                                 } else {
                                     added += 30
                                     msg = "Plunge detected! Dropped ${Math.round(oldLux - luxVal)} lux rapidly."
-                                    activeFactors++; activeFactorNames << "Solar Plunge"
+                                    activeFactors++; activeFactorNames << "Solar Plunge Velocity"
                                 }
                             }
                         }
@@ -1278,7 +1420,8 @@ def evaluateWeather() {
                     msg = "Inactive (Sun too low: ${Math.round(currentElev)}°)"
                 }
                 
-                diagList << [name: "Solar Plunge Velocity", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Solar Plunge Velocity", added)
+                recordDiag("Solar Plunge Velocity", added, msg)
                 probability += added
             } else { diagList << [name: "Solar Plunge Velocity", status: "OFF", effect: "--", desc: "Disabled"] }
             
@@ -1293,9 +1436,10 @@ def evaluateWeather() {
                 def oldestWind = state.windHistory?.size() > 0 ? (state.windHistory.first()?.value as Float ?: 0.0) : 0.0
                 def msg = "Stable (Wind normal)"
                 if (oldestWind > windSteady && windVal <= windCalm && pTrendData.rate <= pDropMild) {
-                    added += 25; msg = "Sudden calm + dropping pressure (Storm stall precursor)"; activeFactors++; activeFactorNames << "Wind Trough"
+                    added += 25; msg = "Sudden calm + dropping pressure (Storm stall precursor)"; activeFactors++; activeFactorNames << "Wind Troughing"
                 }
-                diagList << [name: "Wind Troughing", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Wind Troughing", added)
+                recordDiag("Wind Troughing", added, msg)
                 probability += added
             } else { diagList << [name: "Wind Troughing", status: "OFF", effect: "--", desc: "Disabled"] }
             
@@ -1304,9 +1448,10 @@ def evaluateWeather() {
                 def added = 0
                 def msg = "Stable (Gusts normal)"
                 if (wTrendData.diff >= windSpike && state.windHistory?.size() > 0 && (state.windHistory.last()?.value as Float) > windHigh) {
-                    added += 15; msg = "Sudden high wind gust detected"; activeFactors++; activeFactorNames << "Wind Gust"
+                    added += 15; msg = "Sudden high wind gust detected"; activeFactors++; activeFactorNames << "Wind Gust Fronts"
                 }
-                diagList << [name: "Wind Gust Fronts", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Wind Gust Fronts", added)
+                recordDiag("Wind Gust Fronts", added, msg)
                 probability += added
             } else { diagList << [name: "Wind Gust Fronts", status: "OFF", effect: "--", desc: "Disabled"] }
 
@@ -1322,14 +1467,15 @@ def evaluateWeather() {
                         gustFactorDetected = true
                         added += 25
                         msg = "Outflow Boundary: Gust spiked to ${String.format('%.1f', windGustVal)} (30m Avg Speed: ${String.format('%.1f', avgWind)})"
-                        activeFactors++; activeFactorNames << "Gust Factor"
+                        activeFactors++; activeFactorNames << "Outflow Boundary (Gust Factor)"
                     } else {
                         msg = "Stable (Current Gust: ${String.format('%.1f', windGustVal)}, Avg Speed: ${String.format('%.1f', avgWind)})"
                     }
                 } else {
                     msg = "Gathering baseline data..."
                 }
-                diagList << [name: "Outflow Boundary (Gust Factor)", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Outflow Boundary (Gust Factor)", added)
+                recordDiag("Outflow Boundary (Gust Factor)", added, msg)
                 probability += added
             } else { diagList << [name: "Outflow Boundary (Gust Factor)", status: "OFF", effect: "--", desc: "Disabled"] }
         } else {
@@ -1342,9 +1488,10 @@ def evaluateWeather() {
                 def added = 0
                 def msg = "Direction stable"
                 if (state.windShiftDetected) {
-                    added += 20; msg = "Severe direction shift detected (Frontal Passage)"; activeFactors++; activeFactorNames << "Wind Shift"
+                    added += 20; msg = "Severe direction shift detected (Frontal Passage)"; activeFactors++; activeFactorNames << "Wind Direction Shift"
                 }
-                diagList << [name: "Wind Direction Shift", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Wind Direction Shift", added)
+                recordDiag("Wind Direction Shift", added, msg)
                 probability += added
             } else { diagList << [name: "Wind Direction Shift", status: "OFF", effect: "--", desc: "Disabled"] }
         } else { diagList << [name: "Wind Direction Shift", status: "OFF", effect: "--", desc: "No Wind Dir Sensor"] }
@@ -1357,19 +1504,20 @@ def evaluateWeather() {
                 if (strikeCount > 0 && closestLightning != 999.0) {
                     msg = "Vector: ${state.lightningVectorStr}"
                     if (vectorData.status == "Approaching") {
-                        added += 40; msg += " (Storm core approaching)"; activeFactors++; activeFactorNames << "Vectoring"
+                        added += 40; msg += " (Storm core approaching)"; activeFactors++; activeFactorNames << "Lightning Vectoring"
                     } else if (vectorData.status == "Departing") {
                         added -= 40; msg += " (Storm core departing)"
                         if (state.weatherState != "Raining" && state.weatherState != "Sprinkling") vectorBypass = true 
                     } else if (closestLightning <= lightNear) {
                         if (isPulsePowderKeg) {
-                            added += 30; msg += " (Pulse Storm: In-situ vertical lightning growth)"; activeFactors++; activeFactorNames << "Pulse Storm (Lightning)"
+                            added += 30; msg += " (Pulse Storm: In-situ vertical lightning growth)"; activeFactors++; activeFactorNames << "Lightning Vectoring"
                         } else {
-                            added += 30; msg += " (Critical proximity: Stalled/Lateral)"; activeFactors++; activeFactorNames << "Vectoring"
+                            added += 30; msg += " (Critical proximity: Stalled/Lateral)"; activeFactors++; activeFactorNames << "Lightning Vectoring"
                         }
                     }
                 }
-                diagList << [name: "Lightning Vectoring", status: "ON", effect: added == 0 ? "0%" : (added > 0 ? "+${added}%" : "${added}%"), desc: msg]
+                added = applyWeight("Lightning Vectoring", added)
+                recordDiag("Lightning Vectoring", added, msg)
                 probability += added
             } else if (settings.enableLightningLogic != false) {
                 totalModelsEnabled++
@@ -1378,11 +1526,12 @@ def evaluateWeather() {
                 if (strikeCount > 0 && closestLightning != 999.0) {
                     def reqStrikes = settings.lightningStrikeThreshold ?: 10
                     if (strikeCount >= reqStrikes) {
-                        if (closestLightning <= lightNear) { added += 50; msg = "Critical proximity"; activeFactors++; activeFactorNames << "Lightning" }
-                        else if (closestLightning <= lightAppr) { added += 25; msg = "Storms approaching"; activeFactors++; activeFactorNames << "Lightning" }
+                        if (closestLightning <= lightNear) { added += 50; msg = "Critical proximity"; activeFactors++; activeFactorNames << "Lightning Proximity" }
+                        else if (closestLightning <= lightAppr) { added += 25; msg = "Storms approaching"; activeFactors++; activeFactorNames << "Lightning Proximity" }
                     } else { msg = "Strikes below threshold (${reqStrikes})" }
                 }
-                diagList << [name: "Lightning Proximity", status: "ON", effect: added > 0 ? "+${added}%" : "0%", desc: msg]
+                added = applyWeight("Lightning Proximity", added)
+                recordDiag("Lightning Proximity", added, msg)
                 probability += added
             }
         } else { diagList << [name: "Lightning Logic", status: "OFF", effect: "--", desc: "No Lightning Sensor"] }
@@ -1444,15 +1593,23 @@ def evaluateWeather() {
             }
         } else { diagList << [name: "Algorithmic Synergy", status: "OFF", effect: "--", desc: "Disabled"] }
         
+        // Push the active factor names to ML history array
+        if (activeFactorNames.size() > 0) {
+            state.activeModulesThisPrediction = activeFactorNames.unique()
+        }
+        
         if (settings.enableAutoCalibration != false) {
             def mult = state.calibrationMultiplier ?: 1.0
             if (mult < 1.0) {
-                diagList << [name: "Auto-Calibration", status: "ACTIVE", effect: "x${mult}", desc: "Penalty applied due to ${state.falsePositiveCount} prior false positives"]
+                diagList << [name: "Global Auto-Calibration", status: "ACTIVE", effect: "x${String.format('%.2f', mult)}", desc: "Global penalty applied due to ${state.falsePositiveCount} false positives"]
+                probability *= mult
+            } else if (mult > 1.0) {
+                diagList << [name: "Global Auto-Calibration", status: "ACTIVE", effect: "x${String.format('%.2f', mult)}", desc: "Global bonus applied due to ${state.falseNegativeCount} missed predictions"]
                 probability *= mult
             } else {
-                diagList << [name: "Auto-Calibration", status: "ON", effect: "1.0x", desc: "Microclimate tracking stable"]
+                diagList << [name: "Global Auto-Calibration", status: "ON", effect: "1.0x", desc: "Tracking stable"]
             }
-        } else { diagList << [name: "Auto-Calibration", status: "OFF", effect: "--", desc: "Disabled"] }
+        } else { diagList << [name: "Global Auto-Calibration", status: "OFF", effect: "--", desc: "Disabled"] }
 
         probability = Math.round(probability)
         if (probability < 0) probability = 0
@@ -1474,6 +1631,7 @@ def evaluateWeather() {
             diagList << [name: "Physical Hardware Trigger", status: "ACTIVE", effect: "100%", desc: leakWet ? "Instant Leak Sensor is WET" : "Rain Gauge Tipped"]
             state.peakProb = 100
             state.peakProbTime = now()
+            state.rainOccurredDuringPrediction = true 
         }
         
         if (dewRejectionActive) diagList << [name: "Dew Rejection", status: "ACTIVE", effect: "0%", desc: "Leak Sensor ignored (Morning Dew/Frost Detected)"]
@@ -1486,6 +1644,7 @@ def evaluateWeather() {
         if (probability == 100) {
             state.peakProb = 100
             state.peakProbTime = now()
+            state.rainOccurredDuringPrediction = true 
         }
         
         if (state.hardwareAnomalyActive) {
@@ -1579,6 +1738,7 @@ def evaluateWeather() {
         def elapsedSecs = (now() - state.probThresholdCrossedTime) / 1000
         if (elapsedSecs >= delaySecs) {
             safeOn(switchProbable) 
+            state.activePrediction = true 
             
             if (settings.enableAutoCalibration != false && !state.probableStartTime) {
                 state.probableStartTime = now()
@@ -1601,6 +1761,33 @@ def evaluateWeather() {
             state.probThresholdCrossedTime = null
         }
         unschedule("executeProbableAlert")
+
+        // Evaluate the end of the prediction cycle (Machine Learning Logic)
+        if (state.activePrediction) {
+            if (!state.rainOccurredDuringPrediction) {
+                state.falsePositiveCount = (state.falsePositiveCount ?: 0) + 1
+                
+                def culprits = state.activeModulesThisPrediction ?: []
+                if (culprits.size() > 0) {
+                    culprits.each { mod ->
+                        def weights = state.algoWeights ?: [:]
+                        def oldW = weights[mod] != null ? weights[mod] : 1.0
+                        weights[mod] = Math.max(0.5, oldW * 0.90) // 10% specific penalty to the algorithms that fired
+                        state.algoWeights = weights
+                        logAction("Auto-Calibration: Penalizing '${mod}' by 10% (New multiplier: ${String.format('%.2f', state.algoWeights[mod])}x)")
+                    }
+                } else {
+                    // Fallback to global penalty if no specific algorithm crossed the threshold
+                    def newMult = (state.calibrationMultiplier ?: 1.0) * 0.95 
+                    if (newMult < 0.5) newMult = 0.5 
+                    state.calibrationMultiplier = newMult
+                    logAction("Auto-Calibration: Unattributed False positive detected. Global Penalty applied. New Weight: ${String.format('%.2f', newMult)}x")
+                }
+            }
+            state.activePrediction = false
+            state.rainOccurredDuringPrediction = false
+            state.activeModulesThisPrediction = []
+        }
     }
     
     def targetState = "Clear"
@@ -1694,10 +1881,19 @@ def evaluateWeather() {
             safeOff(switchSprinkling)
             logAction("Weather cleared. ${settings.clearDelayMins != null ? settings.clearDelayMins : 60}m All-Clear timer and ${settings.precipResetMins != null ? settings.precipResetMins : 120}m re-arm timer started.")
         } else {
+            
+            if (!state.activePrediction && currentState == "Clear") {
+                state.falseNegativeCount = (state.falseNegativeCount ?: 0) + 1
+                def newMult = (state.calibrationMultiplier ?: 1.0) * 1.05 
+                if (newMult > 1.5) newMult = 1.5 // Cap global bonus at 1.5x
+                state.calibrationMultiplier = newMult
+                logAction("Auto-Calibration: Missed rain prediction (False Negative). Global Sensitivity boosted. New Weight: ${String.format('%.2f', newMult)}x")
+            }
+
             state.precipEndedAt = null 
             
             if (targetState == "Raining") {
-                safeOn(switchSprinkling) // Keeps sprinkling active alongside heavy rain switch
+                safeOn(switchSprinkling) 
                 safeOn(switchRaining)
                 if (!isStale && state.stormArmed) {
                     sendAlert("⛈️ Weather Update: Heavy Rain detected. Probability: ${Math.round(probability)}%", settings.rainNotifyDevices, 3)
