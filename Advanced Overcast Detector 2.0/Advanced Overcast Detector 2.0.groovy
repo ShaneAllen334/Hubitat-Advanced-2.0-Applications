@@ -1,7 +1,6 @@
 /**
  * Advanced Overcast Manager 2.0
  *
- * Author: ShaneAllen
  */
 definition(
     name: "Advanced Overcast Manager 2.0",
