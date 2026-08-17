@@ -1,13 +1,13 @@
 /**
- * Advanced Mail Monitor 2.0
+ * Advanced Mail Manager 2.0
  *
  * Author: ShaneAllen
  */
 definition(
-    name: "Advanced Mail Monitor 2.0",
+    name: "Advanced Mail Manager 2.0",
     namespace: "ShaneAllen",
     author: "ShaneAllen",
-    description: "",
+    description: "None",
     category: "Convenience",
     iconUrl: "",
     iconX2Url: ""
@@ -135,13 +135,6 @@ def mainPage() {
 
         section("<b>4. Visual Indicators & Lights</b>", hideable: true, hidden: true) {
             input "indicatorLight", "capability.colorControl", title: "Standard RGB Lights", required: false, multiple: true
-            
-            input "inovelliSwitches", "capability.pushableButton", title: "Inovelli Red Series Switches", required: false, multiple: true, submitOnChange: true
-            if (inovelliSwitches) {
-                input "inovelliTarget", "enum", title: "Inovelli Target LEDs", required: true, defaultValue: "All", options: [
-                    "All":"All LEDs", "7":"LED 7 (Top)", "6":"LED 6", "5":"LED 5", "4":"LED 4 (Middle)", "3":"LED 3", "2":"LED 2", "1":"LED 1 (Bottom)"
-                ]
-            }
 
             input "deliveryColor", "enum", title: "Color when Mail is Delivered", required: false, defaultValue: "Green", options: ["Red", "Green", "Blue", "Yellow", "Orange", "Purple", "Pink", "White"]
             input "lightLevel", "number", title: "Indicator Light Level (%)", defaultValue: 100, required: false, range: "1..100"
@@ -168,6 +161,7 @@ def mainPage() {
         }
 
         section("<b>⚙️ 7. System Settings & Reset</b>", hideable: true, hidden: true) {
+            input "startupDelay", "number", title: "Power Outage Delay (Minutes to ignore sensors after hub reboot)", defaultValue: 5, required: true
             input "activeModes", "mode", title: "Active Modes", multiple: true, required: false
             input "btnForceReset", "button", title: "Reset Historical Averages & Logs"
         }
@@ -180,6 +174,9 @@ def updated() { unsubscribe(); unschedule(); initialize() }
 def initialize() {
     state.historyLog = state.historyLog ?: []
     
+    // Listen for hub reboots to handle power outages
+    subscribe(location, "systemStart", "hubRestartHandler")
+    
     subscribe(mailSensors, "contact.open", "sensorOpenHandler")
     
     if (tempSensor) {
@@ -191,19 +188,46 @@ def initialize() {
     if (exteriorDoors) subscribe(exteriorDoors, "contact.open", "homeActivityHandler")
     if (arrivalSensors) subscribe(arrivalSensors, "presence.present", "homeActivityHandler")
     if (priorityYieldSwitch) subscribe(priorityYieldSwitch, "switch", "priorityYieldHandler")
-    
-    if (inovelliSwitches) subscribe(inovelliSwitches, "switch.off", "inovelliMailSwitchOffHandler")
+
+    // Schedule midnight reset for daily stats
+    schedule("0 0 0 * * ?", resetDailyStats)
 }
 
 // ------------------------------------------------------------------------------
 // APP HANDLERS
 // ------------------------------------------------------------------------------
 
-def inovelliMailSwitchOffHandler(evt) {
-    if (mailSwitch && mailSwitch.currentValue("switch") == "on") {
-        log.info "Switch '${evt.device.displayName}' turned off, but Mail is still waiting. Re-applying Mail LED indicator."
-        setLightColor([evt.device], deliveryColor, lightLevel ?: 100, inovelliTarget ?: "All")
+def hubRestartHandler(evt) {
+    log.info "Hub restarted. Applying power-outage delay and checking schedules."
+    
+    // Record the exact time the hub finished booting
+    state.hubStartTime = new Date().time
+    
+    // Re-initialize the midnight schedule in case the platform dropped it during the crash
+    unschedule()
+    schedule("0 0 0 * * ?", resetDailyStats)
+    
+    // Catch up if power was out across midnight
+    def today = new Date().format("yyyy-MM-dd", location.timeZone ?: TimeZone.getDefault())
+    if (state.lastResetDate != today) {
+        log.info "Power was out over midnight. Forcing missed daily reset now."
+        resetDailyStats()
     }
+    
+    addToHistory("SYSTEM: Hub rebooted. Delaying sensors for ${startupDelay ?: 5} minutes.")
+}
+
+def resetDailyStats() {
+    log.info "Midnight Reset: Clearing today's delivery and retrieval times."
+    state.todayDeliveryTime = null
+    state.todayRetrievalTime = null
+    state.lastRetrievalWalkTime = null
+    state.lastTempAlertDate = null
+    
+    // Track the date so we know if we missed a reset
+    state.lastResetDate = new Date().format("yyyy-MM-dd", location.timeZone ?: TimeZone.getDefault())
+    
+    addToHistory("SYSTEM: Daily times reset for the new day.")
 }
 
 def priorityYieldHandler(evt) {
@@ -218,8 +242,7 @@ def priorityYieldHandler(evt) {
                 overrideSwitch.on()
             }
             
-            if (indicatorLight) setLightColor(indicatorLight, deliveryColor, lightLevel ?: 100, "All")
-            if (inovelliSwitches) setLightColor(inovelliSwitches, deliveryColor, lightLevel ?: 100, inovelliTarget ?: "All")
+            if (indicatorLight) setLightColor(indicatorLight, deliveryColor, lightLevel ?: 100)
         }
     }
 }
@@ -232,20 +255,16 @@ def appButtonHandler(btn) {
         if (indicatorLight) {
             if (retrievalLightAction == "Turn Off") restoreLightState(indicatorLight)
         }
-        if (inovelliSwitches) {
-            inovelliSwitches.each { device -> 
-                def target = inovelliTarget ?: "All"
-                if (target == "All") {
-                    if (device.hasCommand("ledEffectAll")) device.ledEffectAll(255, 0, 0, 0)
-                } else {
-                    if (device.hasCommand("ledEffectOne")) device.ledEffectOne(target, 255, 0, 0, 0)
-                }
-            }
-        }
  
         if (overrideSwitch) overrideSwitch.off()
         
         state.lastValidStateChange = 0 
+        
+        // Clears the dashboard text strings
+        state.todayDeliveryTime = null
+        state.todayRetrievalTime = null
+        state.lastRetrievalWalkTime = null
+        
         addToHistory("MANUAL CLEAR: System reset via app dashboard.")
         
     } else if (btn == "btnForceReset") {
@@ -267,6 +286,17 @@ def homeActivityHandler(evt) { state.lastHomeActivity = new Date().time }
 def sensorOpenHandler(evt) {
     try {
         def now = new Date().time
+
+        // Power Outage / Hub Reboot Delay check
+        if (state.hubStartTime) {
+            def uptimeMillis = now - state.hubStartTime
+            def delayMillis = (startupDelay != null ? startupDelay.toInteger() : 5) * 60000
+            
+            if (uptimeMillis < delayMillis) {
+                log.info "Ignored sensor event: Mesh network stabilizing after power outage."
+                return 
+            }
+        }
 
         // 1. BULLETPROOF DUAL-SENSOR LOCK
         // atomicState writes directly to the DB to prevent milliseconds-apart parallel execution.
@@ -345,24 +375,14 @@ def sensorOpenHandler(evt) {
             state.todayRetrievalTime = currentTimeStr
             updateAverage("retrieval", currentMinutes)
             addToHistory("RETRIEVAL DETECTED.${tripTimeStr}")
-      
+       
             if (retrievalLightAction == "Turn Off") {
                 if (indicatorLight) restoreLightState(indicatorLight)
-                if (inovelliSwitches) {
-                    inovelliSwitches.each { device -> 
-                        def target = inovelliTarget ?: "All"
-                        if (target == "All") {
-                            if (device.hasCommand("ledEffectAll")) device.ledEffectAll(255, 0, 0, 0)
-                        } else {
-                            if (device.hasCommand("ledEffectOne")) device.ledEffectOne(target, 255, 0, 0, 0)
-                        }
-                    }
-                }
             }
             
             if (overrideSwitch) overrideSwitch.off()
             if (sendPushRetrieval) sendMessage("📬 Mail retrieved!")
-     
+       
         } else {
             // --- MAIL DELIVERY LOGIC ---
             mailSwitch.on()
@@ -380,13 +400,12 @@ def sensorOpenHandler(evt) {
             }
             
             if (indicatorLight) captureLightState(indicatorLight)
-     
+       
             if (overrideSwitch && overrideSwitch.currentValue("switch") != "on") {
                 overrideSwitch.on()
             }
             
-            if (indicatorLight) setLightColor(indicatorLight, deliveryColor, lightLevel ?: 100, "All")
-            if (inovelliSwitches) setLightColor(inovelliSwitches, deliveryColor, lightLevel ?: 100, inovelliTarget ?: "All")
+            if (indicatorLight) setLightColor(indicatorLight, deliveryColor, lightLevel ?: 100)
         }
         
     } catch (Exception e) {
@@ -438,33 +457,24 @@ def restoreLightState(devices) {
     state.savedLightStates = [:] 
 }
 
-def setLightColor(devices, colorName, level, target = "All") {
-    def inovelliHue = 0 
+def setLightColor(devices, colorName, level) {
     def standardHue = 0
     def standardSat = 100
     
     switch(colorName) {
-        case "White": inovelliHue = 255; standardSat = 0; break 
-        case "Red": inovelliHue = 0; standardHue = 0; break 
-        case "Green": inovelliHue = 85; standardHue = 33; break 
-        case "Blue": inovelliHue = 170; standardHue = 66; break 
-        case "Yellow": inovelliHue = 42; standardHue = 16; break 
-        case "Orange": inovelliHue = 14; standardHue = 10; break 
-        case "Purple": inovelliHue = 191; standardHue = 75; break 
-        case "Pink": inovelliHue = 234; standardHue = 83; break 
+        case "White": standardSat = 0; break 
+        case "Red": standardHue = 0; break 
+        case "Green": standardHue = 33; break 
+        case "Blue": standardHue = 66; break 
+        case "Yellow": standardHue = 16; break 
+        case "Orange": standardHue = 10; break 
+        case "Purple": standardHue = 75; break 
+        case "Pink": standardHue = 83; break 
     }
     
     devices.each { device -> 
-        if (device.hasCommand("ledEffectAll") || device.hasCommand("ledEffectOne")) {
-            if (target == "All") {
-                if (device.hasCommand("ledEffectAll")) device.ledEffectAll(1, inovelliHue, level as Integer, 255) 
-            } else {
-                if (device.hasCommand("ledEffectOne")) device.ledEffectOne(target, 1, inovelliHue, level as Integer, 255)
-            }
-        } else {
-            device.on() 
-            device.setColor([hue: standardHue, saturation: standardSat, level: level as Integer])
-        }
+        device.on() 
+        device.setColor([hue: standardHue, saturation: standardSat, level: level as Integer])
     }
 }
 
