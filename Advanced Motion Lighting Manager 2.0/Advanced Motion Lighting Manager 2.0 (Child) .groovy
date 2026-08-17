@@ -1,6 +1,7 @@
 /**
  * Advanced Motion Lighting Manager 2.0 (Child) 
  *
+ * Author: ShaneAllen
  */
 definition(
     name: "Advanced Motion Lighting Manager 2.0 (Child)",
@@ -704,8 +705,19 @@ def isPrimaryActive() {
 def isKeepAliveActive() {
     if (isUtilityOnly) return false
     def mActive = keepAliveMotionSensors?.any { it.currentValue("motion") == "active" }
-    def vActive = keepAliveVibrationSensors?.any { it.currentValue("acceleration") == "active" }
     def sActive = keepAliveSwitches?.any { it.currentValue("switch") == "on" }
+    
+    // 5-Minute Rolling Window for Vibration Sensors
+    def vActive = false
+    if (keepAliveVibrationSensors) {
+        def lastVib = atomicState.lastVibrationTime ?: 0
+        if ((now() - lastVib) <= 300000) { // 300,000 ms = 5 minutes
+            vActive = true
+        } else {
+            vActive = keepAliveVibrationSensors.any { it.currentValue("acceleration") == "active" }
+        }
+    }
+    
     return (mActive || vActive || sActive)
 }
 
@@ -906,6 +918,11 @@ def keepAliveHandler(evt) {
     if (isActiveEvent) {
         atomicState.lastPrimaryActiveTime = now()
         
+        // Track the exact timestamp of the vibration
+        if (evt.name == "acceleration") {
+            atomicState.lastVibrationTime = now()
+        }
+        
         if (atomicState.manuallyTurnedOn) {
             startTurnOffTimer()
         } else if (atomicState.appTurnedOn) { 
@@ -918,8 +935,21 @@ def keepAliveHandler(evt) {
 
 def evaluateKeepAliveOff() {
     if (isPaused() || isUtilityOnly) return
-    if (atomicState.appTurnedOn && !isPrimaryActive() && !isKeepAliveActive()) {
-        startTurnOffTimer()
+    
+    if (atomicState.appTurnedOn && !isPrimaryActive()) {
+        if (!isKeepAliveActive()) {
+            startTurnOffTimer()
+        } else {
+            // If kept alive by the 5-min vibration window, schedule a re-eval when it expires
+            if (keepAliveVibrationSensors) {
+                def lastVib = atomicState.lastVibrationTime ?: 0
+                def timeSinceVib = now() - lastVib
+                if (timeSinceVib < 300000) {
+                    def delaySec = (300000 - timeSinceVib) / 1000
+                    runIn(delaySec.toInteger() + 1, "evaluateKeepAliveOff")
+                }
+            }
+        }
     }
 }
 
@@ -1060,6 +1090,7 @@ def cancelAllTurnOffTimers() {
     unschedule("verifyTurnOff") 
     unschedule("forceOffHandler")
     unschedule("pollLuxWhileActive") 
+    unschedule("evaluateKeepAliveOff") // Added to clear pending window expirations
     
     if (!atomicState.arrivalActive) {
         atomicState.stdTaskTime = null 
