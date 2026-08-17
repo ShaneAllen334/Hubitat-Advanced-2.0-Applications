@@ -1,7 +1,6 @@
 /**
  * Advanced Mail Monitor 2.0
  *
- * Author: ShaneAllen
  */
 definition(
     name: "Advanced Mail Monitor 2.0",
