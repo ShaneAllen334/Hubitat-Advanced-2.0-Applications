@@ -2448,7 +2448,7 @@ def forceBedExit(uId, rNum, keepExistingTime = false) {
     
     if (state.asleepTime["${uId}"]) {
         state.lastSessionAsleep["${uId}"] = Math.max(0, (((exitTime - state.asleepTime["${uId}"]) / 60000).toInteger() - bathDur))
-        if (state.sleepState["${uId}"] == "SLEEPING") {
+        if (state.sleepState["${uId}"] == "SLEEPING" || state.sleepState["${uId}"] == "IN BED") {
              def stillStart = state.lastStillStartTime["${uId}"] ?: state.asleepTime["${uId}"] ?: exitTime
              def gap = exitTime - stillStart
              if (gap >= 2700000) state.deepSleepDuration["${uId}"] = (state.deepSleepDuration["${uId}"] ?: 0) + (gap / 60000).toInteger()
