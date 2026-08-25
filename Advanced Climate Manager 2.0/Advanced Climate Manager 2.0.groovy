@@ -393,6 +393,38 @@ def mainPage() {
                 def moodStatus = state.moodCoolingActive ? "<span style='color:blue; font-weight:bold;'>Active (-2.0° Cooling Offset)</span>" : "<span style='color:gray;'>Idle (Moods Normal)</span>"
                 def moodDashStr = "${moodIcons}<br><span style='font-size:12px; color:#555;'>Result: ${moodStatus}</span>"
 
+                // --- PERIMETER SAFETY (WINDOWS/DOORS) DASHBOARD DISPLAY ---
+                def perimeterStr = "<span style='color:gray;'>Secure (All Closed)</span>"
+                if (!enableWindowDefeat) {
+                    perimeterStr = "<span style='color:gray;'>Disabled</span>"
+                } else {
+                    def openList = contactSensors?.findAll { it.currentValue("contact") == "open" }
+                    def openSensors = openList?.collect { "<b>" + it.displayName + "</b>" }?.join(", ")
+                    
+                    if (state.windowRecoveryTime && now() < state.windowRecoveryTime) {
+                        def remSecs = Math.max(0, Math.round((state.windowRecoveryTime - now()) / 1000))
+                        def remMins = Math.floor(remSecs / 60).toInteger()
+                        def remSecsDisplay = (remSecs % 60).toString().padLeft(2, '0')
+                        perimeterStr = "<span style='color:blue;'><b>Recovery Pending (${remMins}:${remSecsDisplay} remaining)</b></span><br><span style='font-size:12px; color:#555;'>All doors/windows closed. Waiting to restore HVAC.</span>"
+                    } else if (state.windowOpenHold) {
+                        perimeterStr = "<span style='color:red;'><b>HVAC LOCKED OFF</b></span><br><span style='font-size:12px; color:#555;'>Cause: ${openSensors ?: 'Unknown'} left open.</span>"
+                    } else if (state.windowDefeatTime && now() < state.windowDefeatTime) {
+                        def remSecs = Math.max(0, Math.round((state.windowDefeatTime - now()) / 1000))
+                        def remMins = Math.floor(remSecs / 60).toInteger()
+                        def remSecsDisplay = (remSecs % 60).toString().padLeft(2, '0')
+                        perimeterStr = "<span style='color:orange;'><b>Defeat Pending (${remMins}:${remSecsDisplay} remaining)</b></span><br><span style='font-size:12px; color:#555;'>Open: ${openSensors}</span>"
+                    } else if (openList && openList.size() > 0) {
+                        // CATCH-ALL: Door is open, but timer was dropped or missed!
+                        perimeterStr = "<span style='color:orange;'><b>Door Open Detected (Timer Engaging...)</b></span><br><span style='font-size:12px; color:#555;'>Open: ${openSensors}</span>"
+                    }
+                }
+                
+                // --- SERVICE MODE DASHBOARD DISPLAY ---
+                def serviceStr = "<span style='color:gray;'>Inactive (Auto Mode)</span>"
+                if (serviceSwitch && serviceSwitch.currentValue("switch") == "on") {
+                    serviceStr = "<span style='color:red;'><b>ACTIVE (HVAC Locked OFF)</b></span>"
+                }
+
                 // Unified Dashboard HTML
                 def dashHTML = """
                 <style>
@@ -417,6 +449,8 @@ def mainPage() {
                         <tr><td class="dash-hl">System Efficiency Score</td><td colspan="3" class="dash-val">${efficiencyScoreStr} <span style='font-size:11px; color:gray;'>(Based on Hardware Delta-T, Cycles, & Filter)</span></td></tr>
 
                         <tr><td colspan="4" class="dash-subhead">Internal Diagnostics</td></tr>
+                        <tr><td class="dash-hl">Perimeter Safety (Doors/Windows)</td><td colspan="3" class="dash-val">${perimeterStr}</td></tr>
+                        <tr><td class="dash-hl">Force OFF / Service Mode</td><td colspan="3" class="dash-val">${serviceStr}</td></tr>
                         <tr><td class="dash-hl">Location Mode</td><td colspan="3" class="dash-val">${currentLocMode}</td></tr>
                         <tr><td class="dash-hl">Auto-Swap Distance</td><td colspan="3" class="dash-val">${swapText}</td></tr>
                         <tr><td class="dash-hl">Calculated Deadband</td><td colspan="3" class="dash-val">${currentDeadbandStr}</td></tr>
@@ -564,6 +598,7 @@ def mainPage() {
 
         section("<b>App Control & Main HVAC System</b>", hideable: true, hidden: true) {
             input "appEnableSwitch", "capability.switch", title: "Master Enable/Disable Switch (Optional)", required: false, multiple: false
+            input "serviceSwitch", "capability.switch", title: "HVAC Service / Force OFF Switch (Suspends automation and locks unit OFF)", required: false, multiple: false
             input "thermostat", "capability.thermostat", title: "Select Main Thermostat", required: false, multiple: false
             if (state.manualHoldEnds && now() < state.manualHoldEnds) input "releaseHold", "button", title: "Release Manual Hold"
         }
@@ -645,12 +680,12 @@ def mainPage() {
             }
         }
 
-        section("<b>4. Open Window / Door Defeat</b>", hideable: true, hidden: true) {
-            paragraph "<div style='font-size:13px; color:#555;'><b>What it does:</b> Automatically intercepts and shuts off the HVAC if a monitored door or window is left open past the delay threshold. Restores normal operation once closed.</div>"
+        section("<b>4. Open Window / Door Defeat & Recovery</b>", hideable: true, hidden: true) {
+            paragraph "<div style='font-size:13px; color:#555;'><b>What it does:</b> Automatically intercepts and shuts off the HVAC if a monitored door or window is left open past the delay threshold. Once all doors are closed, it enforces an identical recovery delay before restoring the system.</div>"
             input "enableWindowDefeat", "bool", title: "<b>Enable Window/Door Defeat</b>", defaultValue: true, submitOnChange: true
             if (enableWindowDefeat) {
                 input "contactSensors", "capability.contactSensor", title: "Select Perimeter Contact Sensors", required: false, multiple: true
-                input "contactDelay", "number", title: "Minutes to wait before shutting off HVAC", required: false, defaultValue: 3
+                input "contactDelay", "number", title: "Minutes to wait before shutting off (and before recovering)", required: false, defaultValue: 3
             }
         }
 
@@ -830,6 +865,8 @@ def initialize() {
  
     state.isBuffering = false; state.cycleStartTime = null; state.currentAction = "idle"; state.cycleStartMode = null; state.modeDelayLogged = false
     state.manualHoldEnds = null; state.windowOpenHold = false; state.fireEmergency = false
+    state.windowDefeatTime = null; state.windowRecoveryTime = null
+    state.preDefeatMode = null
     state.currentCycleMaxDeltaT = null
     state.lastCycleMode = null
     
@@ -841,6 +878,7 @@ def initialize() {
     
     if (thermostat) {
         subscribe(thermostat, "thermostatOperatingState", hvacStateHandler)
+        subscribe(thermostat, "thermostatMode", thermostatModeHandler)
         subscribe(thermostat, "coolingSetpoint", setpointHandler)
         subscribe(thermostat, "heatingSetpoint", setpointHandler)
         subscribe(thermostat, "temperature", sensorHandler) 
@@ -864,6 +902,7 @@ def initialize() {
     if (sickModeSwitch) subscribe(sickModeSwitch, "switch", sickModeHandler)
     if (sickModeSwitch2) subscribe(sickModeSwitch2, "switch", sickModeHandler)
     if (sickModeSwitch3) subscribe(sickModeSwitch3, "switch", sickModeHandler)
+    if (serviceSwitch) subscribe(serviceSwitch, "switch", serviceSwitchHandler)
     
     if (moodVarU1) subscribe(location, "variable:${moodVarU1}", "moodChangeHandler")
     if (moodVarU2) subscribe(location, "variable:${moodVarU2}", "moodChangeHandler")
@@ -896,6 +935,7 @@ def initialize() {
     
     // Check initial smoke/co status
     smokeCoHandler([:])
+    if (enableWindowDefeat) contactHandler([:]) // Catch-all: check doors immediately on save/startup
     evaluateSystem()
 }
 
@@ -929,7 +969,7 @@ def routineSweep() {
 }
 
 def sickModeEnforcer() {
-    if (state.fireEmergency || !thermostat) return
+    if (state.fireEmergency || !thermostat || (serviceSwitch && serviceSwitch.currentValue("switch") == "on")) return
 
     def sickSwitches = []
     if (sickModeSwitch) sickSwitches += (sickModeSwitch instanceof List ? sickModeSwitch : [sickModeSwitch])
@@ -961,7 +1001,8 @@ def hubRestartHandler(evt) {
         state.cycleStartMode = null
     }
     
-    state.isBuffering = false; state.windowOpenHold = false; 
+    state.isBuffering = false; state.windowOpenHold = false
+    state.windowDefeatTime = null; state.windowRecoveryTime = null
     state.modeDelayLogged = false
     state.alignmentLockout = null; state.alignmentLockoutTarget = null
     state.activeHysteresis = "idle"
@@ -994,6 +1035,7 @@ def hubRestartHandler(evt) {
 
 def executePostRebootEval() {
     logAction("Hub Reboot 5-minute lockout complete. Restoring normal BMS operations.")
+    if (enableWindowDefeat) contactHandler([:])
     evaluateSystem()
 }
 
@@ -1008,9 +1050,15 @@ def smokeCoHandler(evt) {
     
     if (isFire && !state.fireEmergency) {
         state.fireEmergency = true
+        
+        // Memorize mode before fire isolation
+        def tMode = thermostat?.currentValue("thermostatMode")
+        if (tMode != "off") state.preDefeatMode = tMode
+        
         logAction("CRITICAL EMERGENCY: Smoke/CO detected! Executing HVAC Fire Isolation.")
         
         if (thermostat) {
+            state.lastCommandTime = now()
             thermostat.off()
             thermostat.setThermostatFanMode("auto")
         }
@@ -1020,12 +1068,33 @@ def smokeCoHandler(evt) {
     } else if (!isFire && state.fireEmergency) {
         state.fireEmergency = false
         logAction("Emergency Cleared: Smoke/CO no longer detected. Releasing Fire Isolation.")
+        
+        // Restore mode
+        if (state.preDefeatMode && thermostat) {
+            state.lastCommandTime = now()
+            thermostat.setThermostatMode(state.preDefeatMode)
+            state.preDefeatMode = null
+        }
+        
         evaluateSystem()
     }
 }
 
+def serviceSwitchHandler(evt) {
+    if (evt.value == "on") {
+        logAction("BMS Command -> HVAC Service Mode ACTIVATED. Forcing HVAC OFF and suspending automation.")
+        if (thermostat) {
+            state.lastCommandTime = now()
+            thermostat.off()
+        }
+    } else {
+        logAction("BMS Command -> HVAC Service Mode DEACTIVATED. Restoring automation.")
+    }
+    evaluateSystem()
+}
+
 def sickModeHandler(evt) {
-    if (state.fireEmergency || !thermostat) return 
+    if (state.fireEmergency || !thermostat || (serviceSwitch && serviceSwitch.currentValue("switch") == "on")) return 
     
     def sickSwitches = []
     if (sickModeSwitch) sickSwitches += (sickModeSwitch instanceof List ? sickModeSwitch : [sickModeSwitch])
@@ -1085,9 +1154,12 @@ String getHumanReadableStatus() {
         return "<span style='color:red; font-size:14px;'><b>🚨 CRITICAL: FIRE / CO ISOLATION ACTIVE. HVAC SHUT DOWN. 🚨</b></span>" + sickStr
     }
     
+    if (serviceSwitch && serviceSwitch.currentValue("switch") == "on") return "<span style='color:red; font-size:14px;'><b>🛠️ SERVICE MODE ACTIVE. HVAC LOCKED OFF.</b></span>" + sickStr
+    
     if (appEnableSwitch && appEnableSwitch.currentValue("switch") == "off") status = "The application is disabled via the Master Switch."
     else if (allowedModes && !(allowedModes as List).contains(location.mode)) status = "<span style='color:orange;'><b>App Disabled by Mode:</b></span> The current location mode (<b>${location.mode}</b>) is not selected in your 'Allowed Modes' setting."
     else if (state.rebootLockoutEnds && now() < state.rebootLockoutEnds) status = "<span style='color:red;'><b>Hub Reboot Lockout:</b></span> Allowing HVAC pressures to equalize. Resumes in ${Math.round((state.rebootLockoutEnds - now()) / 60000)} minutes."
+    else if (state.windowRecoveryTime && now() < state.windowRecoveryTime) status = "<span style='color:blue;'><b>HVAC Recovery Pending:</b></span> Doors/windows closed. Restoring in ${Math.round((state.windowRecoveryTime - now()) / 60000)} minutes."
     else if (state.windowOpenHold) status = "<span style='color:red;'><b>HVAC is OFF</b></span> because a monitored perimeter window or door is open."
     else if (state.manualHoldEnds && now() < state.manualHoldEnds) status = "<span style='color:orange;'><b>Automation Paused (Manual Hold):</b></span> Resumes in ${Math.round((state.manualHoldEnds - now()) / 60000)} minutes."
     else if (state.isBuffering) {
@@ -1196,14 +1268,20 @@ def appButtonHandler(btn) {
     def todayStr = new Date().format("MM/dd/yyyy", location.timeZone)
     if (btn == "btnRefresh") {
         logInfo("Dashboard data manually refreshed by user.")
+        if (enableWindowDefeat) contactHandler([:]) // Forces the app to check the doors immediately
     }
     else if (btn == "btnEnforceModes") {
         state.rebootLockoutEnds = null
         state.manualHoldEnds = null
         state.windowOpenHold = false
+        state.windowDefeatTime = null
+        state.windowRecoveryTime = null
         state.isBuffering = false
         state.preBufferCool = null
         state.preBufferHeat = null
+        state.preDefeatMode = null
+        unschedule(executeWindowDefeat)
+        unschedule(releaseWindowDefeat)
         unschedule(releaseBuffer)
         state.alignmentLockout = null
         state.activeHysteresis = "idle"
@@ -1273,9 +1351,14 @@ def modeChangeHandler(evt) {
                     def todayStr = new Date().format("yyyy-MM-dd", location.timeZone)
                     
                     if (state.lastExtendedArrivalDate != todayStr) {
-                        state.extendedArrivalEnds = now() + ((eaRunMins ?: 45) * 60000)
+                        // Calculate total run time: Minimum Run Time + Extended Arrival Time
+                        def baseMinRun = summerMinRunTime != null ? summerMinRunTime.toInteger() : 25
+                        def extraRun = eaRunMins != null ? eaRunMins.toInteger() : 45
+                        def totalRun = baseMinRun + extraRun
+                        
+                        state.extendedArrivalEnds = now() + (totalRun * 60000)
                         state.lastExtendedArrivalDate = todayStr
-                        logAction("Extended Arrival Cooling Triggered! House was away for ${String.format('%.1f', awayHours)} hours and temp is ${currentTemp}°. Forcing ${eaRunMins ?: 45} mins of cooling.")
+                        logAction("Extended Arrival Cooling Triggered! House was away for ${String.format('%.1f', awayHours)} hours and temp is ${currentTemp}°. Forcing ${totalRun} mins of cooling (${baseMinRun}m min-run + ${extraRun}m extension).")
                     } else {
                         logInfo("Extended Arrival Cooling skipped: Feature already executed once today.")
                     }
@@ -1287,8 +1370,34 @@ def modeChangeHandler(evt) {
     evaluateSystem() 
 }
 
+def thermostatModeHandler(evt) {
+    // Ignore changes if a failsafe or manual service switch is active
+    if (state.fireEmergency || state.windowOpenHold || state.isBuffering || (serviceSwitch && serviceSwitch.currentValue("switch") == "on")) return 
+    
+    // 15-second blindspot for incoming mode echoes right after the BMS sends a command.
+    if (state.lastCommandTime && (now() - state.lastCommandTime) < 15000) {
+        return 
+    }
+    
+    def newVal = evt.value?.toLowerCase()
+    
+    if (!state.manualHoldEnds || now() > state.manualHoldEnds) { 
+        state.manualHoldEnds = now() + 7200000 // 2 Hours Hold
+        state.preBufferCool = null
+        state.preBufferHeat = null
+        logAction("MANUAL OVERRIDE: Physical thermostat mode changed to ${newVal?.toUpperCase()}. Automation suspended for 2 Hours.") 
+        evaluateSystem() 
+    } else {
+        state.manualHoldEnds = now() + 7200000 // Reset 2 Hours Hold
+        state.preBufferCool = null
+        state.preBufferHeat = null
+        logAction("MANUAL OVERRIDE: Thermostat mode adjusted again. 2-Hour hold timer reset.")
+        evaluateSystem()
+    }
+}
+
 def setpointHandler(evt) {
-    if (state.fireEmergency || state.windowOpenHold || state.isBuffering) return 
+    if (state.fireEmergency || state.windowOpenHold || state.isBuffering || (serviceSwitch && serviceSwitch.currentValue("switch") == "on")) return 
     
     // 15-second blindspot for incoming setpoint echoes right after the BMS sends a command.
     if (state.lastCommandTime && (now() - state.lastCommandTime) < 15000) {
@@ -1322,8 +1431,21 @@ def setpointHandler(evt) {
 
 def evaluateSystem() {
     if (!thermostat) return
+    
+    // Check Service Switch Override first
+    if (serviceSwitch && serviceSwitch.currentValue("switch") == "on") {
+        if (thermostat.currentValue("thermostatMode") != "off") {
+            state.lastCommandTime = now()
+            thermostat.setThermostatMode("off")
+        }
+        return
+    }
+    
     if (state.fireEmergency) {
-        if (thermostat.currentValue("thermostatMode") != "off") thermostat.setThermostatMode("off")
+        if (thermostat.currentValue("thermostatMode") != "off") {
+            state.lastCommandTime = now()
+            thermostat.setThermostatMode("off")
+        }
         return
     }
     if (state.rebootLockoutEnds && now() < state.rebootLockoutEnds) return
@@ -1736,6 +1858,23 @@ def evaluateSystem() {
         thermostat.setHeatingSetpoint(targetHeat)
         logAction("BMS Command -> Pushing Setpoints to Thermostat: COOL ${targetCool}° | HEAT ${targetHeat}°${syncMessage}${modeHoldMsg}")
     }
+
+    def tMode = thermostat.currentValue("thermostatMode")?.toLowerCase()
+    def isServiceMode = serviceSwitch && serviceSwitch.currentValue("switch") == "on"
+    
+    // --- AUTO-RECOVERY FROM OFF ---
+    // Will NOT trigger if the 2-Hour Manual Hold is actively running
+    if (tMode == "off" && !state.fireEmergency && !state.windowOpenHold && !isServiceMode && !isManualHoldActive) {
+        def currentAvg = getAverageTemp()
+        def restoreMode = (Math.abs(currentAvg - targetCool) < Math.abs(currentAvg - targetHeat)) ? "cool" : "heat"
+        if (currentAvg >= targetCool) restoreMode = "cool"
+        else if (currentAvg <= targetHeat) restoreMode = "heat"
+        
+        logAction("BMS Recovery -> Thermostat is OFF but no safety defeats are active. Auto-recovering to ${restoreMode.toUpperCase()} mode.")
+        state.lastCommandTime = now()
+        thermostat.setThermostatMode(restoreMode)
+        tMode = restoreMode
+    }
     
     // Evaluated safely at root scope to avoid missing property exceptions from Groovy
     def yoyoCheckMins = yoyoCooldownMins != null ? yoyoCooldownMins.toInteger() : 15
@@ -1743,14 +1882,15 @@ def evaluateSystem() {
     
     if (enableAutoSwap && !isManualHoldActive && !isYoYoDelayActive) {
         def currentAvg = getAverageTemp()
-        def tMode = thermostat.currentValue("thermostatMode")?.toLowerCase()
     
         if (tMode == "heat" || tMode == "cool" || tMode == "auto") {
             if (currentAvg >= (targetCool + safeSwapDB) && tMode != "cool") {
                 logAction("BMS Command -> Auto-Swap triggered. Switching thermostat to COOL mode. (Temp: ${currentAvg}°, Target: ${targetCool}°, Safe DB: ${safeSwapDB}°)")
+                state.lastCommandTime = now()
                 thermostat.setThermostatMode("cool")
             } else if (currentAvg <= (targetHeat - safeSwapDB) && tMode != "heat") {
                 logAction("BMS Command -> Auto-Swap triggered. Switching thermostat to HEAT mode. (Temp: ${currentAvg}°, Target: ${targetHeat}°, Safe DB: ${safeSwapDB}°)")
+                state.lastCommandTime = now()
                 thermostat.setThermostatMode("heat")
             }
         }
@@ -1786,15 +1926,78 @@ def compressorWatchdog() {
 
 def contactHandler(evt) { 
     def anyOpen = contactSensors ? contactSensors.any { it.currentValue("contact") == "open" } : false
-    if (anyOpen && !state.windowOpenHold) { 
-        runIn((contactDelay ?: 3) * 60, executeWindowDefeat) 
-    } else if (!anyOpen && state.windowOpenHold) { 
-        logAction("Windows closed. Releasing HVAC Safety Defeat.")
-        state.windowOpenHold = false; unschedule(executeWindowDefeat); evaluateSystem() 
-    } else if (!anyOpen) unschedule(executeWindowDefeat) 
+    
+    if (anyOpen) {
+        // Cancel recovery if a door is opened during the countdown
+        if (state.windowRecoveryTime) {
+            state.windowRecoveryTime = null
+            unschedule(releaseWindowDefeat)
+            logAction("Perimeter sensor opened during recovery countdown. Aborting recovery and maintaining HVAC lock.")
+        }
+        
+        // If we are not currently locked out, start the shutdown timer
+        if (!state.windowOpenHold) { 
+            if (!state.windowDefeatTime || now() > state.windowDefeatTime) {
+                def delay = (contactDelay != null ? contactDelay.toInteger() : 3) * 60
+                state.windowDefeatTime = now() + (delay * 1000)
+                runIn(delay, executeWindowDefeat) 
+                logAction("Perimeter sensor opened. Starting ${contactDelay ?: 3}-minute HVAC shutdown timer.")
+            }
+        }
+    } else { // All doors/windows closed
+        // Cancel shutdown timer if it was running
+        if (state.windowDefeatTime) {
+            state.windowDefeatTime = null
+            unschedule(executeWindowDefeat)
+            logAction("Perimeter sensors closed. HVAC shutdown timer cancelled.")
+        }
+        
+        // If we are currently locked out, start the recovery timer
+        if (state.windowOpenHold) {
+            if (!state.windowRecoveryTime || now() > state.windowRecoveryTime) {
+                def delay = (contactDelay != null ? contactDelay.toInteger() : 3) * 60
+                state.windowRecoveryTime = now() + (delay * 1000)
+                runIn(delay, releaseWindowDefeat)
+                logAction("All perimeter sensors closed. Starting ${contactDelay ?: 3}-minute HVAC recovery timer before restoring normal operation.")
+            }
+        }
+    }
+    evaluateSystem()
 }
 
-def executeWindowDefeat() { state.windowOpenHold = true; if (state.isBuffering) { state.isBuffering = false; unschedule(releaseBuffer) }; logAction("BMS Command -> Safety Defeat Active. Turning HVAC OFF."); thermostat.off() }
+def executeWindowDefeat() { 
+    state.windowOpenHold = true 
+    state.windowDefeatTime = null
+    state.windowRecoveryTime = null
+    if (state.isBuffering) { state.isBuffering = false; unschedule(releaseBuffer) }
+    
+    // MEMORIZE the current mode before turning it off
+    def tMode = thermostat.currentValue("thermostatMode")
+    if (tMode != "off") state.preDefeatMode = tMode
+    
+    logAction("BMS Command -> Safety Defeat Active. Turning HVAC OFF.")
+    state.lastCommandTime = now()
+    thermostat.off() 
+}
+
+def releaseWindowDefeat() {
+    logAction("Perimeter recovery timer complete. Releasing HVAC Safety Defeat.")
+    state.windowOpenHold = false
+    state.windowRecoveryTime = null
+    
+    // RESTORE the memorized mode so the AC actually kicks back on
+    if (state.preDefeatMode) {
+        logAction("BMS Command -> Restoring thermostat mode to ${state.preDefeatMode.toUpperCase()}.")
+        state.lastCommandTime = now()
+        thermostat.setThermostatMode(state.preDefeatMode)
+        state.preDefeatMode = null
+    } else {
+        state.lastCommandTime = now()
+        thermostat.setThermostatMode("auto") // Failsafe
+    }
+    
+    evaluateSystem()
+}
 
 def hvacStateHandler(evt) {
     def stateVal = evt.value?.toLowerCase() ?: ""
